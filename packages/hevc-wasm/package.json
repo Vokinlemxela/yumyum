@@ -1,0 +1,62 @@
+{
+  "name": "@yumyum-player/hevc-wasm",
+  "version": "1.1.0",
+  "description": "Software HEVC/H.265 decoder for Yum-yum Player with a WebAssembly libde265 backend.",
+  "license": "MIT AND LGPL-3.0-or-later",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "worker",
+    "README.md",
+    "LICENSE",
+    "wasm/hevc.js",
+    "wasm/hevc.wasm",
+    "native",
+    "third-party"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "typecheck": "tsc --noEmit",
+    "wasm": "bash native/build.sh",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@yumyum-player/core": "^1.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.41",
+    "@yumyum-player/core": "^1.1.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.5",
+    "vitest": "^4.1.8"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Vokinlemxela/yumyum.git",
+    "directory": "packages/hevc-wasm"
+  },
+  "homepage": "https://github.com/Vokinlemxela/yumyum/tree/main/packages/hevc-wasm#readme",
+  "bugs": "https://github.com/Vokinlemxela/yumyum/issues",
+  "publishConfig": {
+    "access": "public"
+  }
+}

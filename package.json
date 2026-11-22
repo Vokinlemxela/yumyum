@@ -1,0 +1,33 @@
+{
+  "name": "yumyum-player",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Yum-yum Player — open multi-codec browser engine with WebRTC/WHEP, WebSocket and HEVC software decoding.",
+  "license": "MIT",
+  "workspaces": [
+    "packages/player-sdk",
+    "packages/hevc-wasm",
+    "packages/pro-streaming",
+    "packages/transport-webrtc",
+    "packages/hls-packager",
+    "apps/debugger"
+  ],
+  "scripts": {
+    "build": "turbo run build --filter=!developer-demo",
+    "dev": "turbo run dev",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "clean": "turbo run clean",
+    "package": "node packages/hls-packager/index.js",
+    "dev:debugger": "npm run dev -w developer-demo",
+    "build:debugger": "npm run build -w developer-demo"
+  },
+  "devDependencies": {
+    "turbo": "^2.0.0",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "packageManager": "npm@11.3.0"
+}

@@ -1,0 +1,147 @@
+@import "tailwindcss";
+
+/* Tailwind v4 source paths - relative to CSS file */
+@source "../*.{ts,tsx,js,jsx}";
+@source "../components/**/*.{ts,tsx,js,jsx}";
+
+/* Tailwind v4 source paths - relative to apps/debugger project root */
+@source "src/app/**/*.{ts,tsx,js,jsx}";
+@source "src/components/**/*.{ts,tsx,js,jsx}";
+
+
+@theme {
+  --color-background: #030303;
+  --color-surface: #0a0a0a;
+  --color-surface-hover: #121212;
+  --color-border-elite: #1a1a1a;
+  --color-accent-primary: #00FF66;
+  --color-accent-warning: #FFAD00;
+  --color-text-primary: #FFFFFF;
+  --color-text-secondary: #a0a0a0;
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-text-primary);
+  font-family: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+}
+
+/* Custom scrollbars for a premium developer feel */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #050505;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1a1a1a;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #333;
+}
+
+/* ==================== RETRO PAC-MAN TITLE ANIMATIONS ==================== */
+@keyframes pacman-move {
+  /* Resting as green dot */
+  0%, 3% {
+    left: 0px;
+    opacity: 1;
+    transform: translateY(-50%) scale(0.5);
+  }
+  /* Wake up — grow into Pacman */
+  5% {
+    left: 0px;
+    opacity: 1;
+    transform: translateY(-50%) scale(1);
+  }
+  /* Traverse the text */
+  45% {
+    left: calc(100% - 4px);
+    opacity: 1;
+    transform: translateY(-50%) scale(1);
+  }
+  /* Exit right */
+  48% {
+    left: calc(100% + 8px);
+    opacity: 0;
+    transform: translateY(-50%) scale(0);
+  }
+  /* Teleport back while invisible */
+  49% {
+    left: 0px;
+    opacity: 0;
+    transform: translateY(-50%) scale(0);
+  }
+  /* Reappear as dot */
+  55% {
+    left: 0px;
+    opacity: 1;
+    transform: translateY(-50%) scale(0.5);
+  }
+  /* Stay as dot for the rest of the cycle */
+  100% {
+    left: 0px;
+    opacity: 1;
+    transform: translateY(-50%) scale(0.5);
+  }
+}
+
+@keyframes pacman-chomp {
+  0%, 100% {
+    clip-path: polygon(100% 74%, 50% 50%, 100% 26%, 100% 0%, 0% 0%, 0% 100%, 100% 100%);
+  }
+  50% {
+    clip-path: polygon(100% 50%, 50% 50%, 100% 50%, 100% 0%, 0% 0%, 0% 100%, 100% 100%);
+  }
+}
+
+@keyframes letter-eat {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+    filter: drop-shadow(0 0 0px transparent);
+  }
+  1% {
+    opacity: 0;
+    transform: scale(0);
+  }
+  42% {
+    opacity: 0;
+    transform: scale(0);
+  }
+  46% {
+    opacity: 1;
+    transform: scale(1.15);
+    color: var(--color-accent-primary);
+    filter: drop-shadow(0 0 6px var(--color-accent-primary));
+  }
+  49% {
+    opacity: 1;
+    transform: scale(1);
+    color: #ffffff;
+    filter: drop-shadow(0 0 0px transparent);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+    color: #ffffff;
+  }
+}
+
+.animate-pacman-move {
+  animation: pacman-move 6s 1 linear forwards;
+}
+
+.animate-pacman-chomp {
+  animation: pacman-chomp 0.18s infinite linear;
+}
+
+.animate-letter-eat {
+  animation: letter-eat 6s 1 linear forwards;
+}
+

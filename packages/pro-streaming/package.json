@@ -1,0 +1,61 @@
+{
+  "name": "@yumyum-player/pro-streaming",
+  "version": "1.1.0",
+  "description": "Low-latency WebSocket live streaming and on-premises RTSP to MPEG-TS repackaging for Yum-yum Player.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./server": "./server/ws-server.js"
+  },
+  "files": [
+    "dist",
+    "server",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "typecheck": "tsc --noEmit",
+    "serve": "node server/ws-server.js",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@yumyum-player/core": "^1.1.0"
+  },
+  "dependencies": {
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@yumyum-player/core": "^1.1.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.5",
+    "vitest": "^4.1.8"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Vokinlemxela/yumyum.git",
+    "directory": "packages/pro-streaming"
+  },
+  "homepage": "https://github.com/Vokinlemxela/yumyum/tree/main/packages/pro-streaming#readme",
+  "bugs": "https://github.com/Vokinlemxela/yumyum/issues",
+  "publishConfig": {
+    "access": "public"
+  }
+}

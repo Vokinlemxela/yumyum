@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  packages:
+    name: Build & test packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # Build core first so plugins can check against its generated types.
+      - name: Build core
+        run: npm run build --workspace=@yumyum-player/core
+
+      - name: Typecheck
+        run: |
+          npm run typecheck --workspace=@yumyum-player/core
+          npm run typecheck --workspace=@yumyum-player/hevc-wasm
+          npm run typecheck --workspace=@yumyum-player/pro-streaming
+          npm run typecheck --workspace=@yumyum-player/transport-webrtc
+
+      - name: Test
+        run: |
+          npm test --workspace=@yumyum-player/core
+          npm test --workspace=@yumyum-player/hevc-wasm
+          npm test --workspace=@yumyum-player/pro-streaming
+          npm test --workspace=@yumyum-player/transport-webrtc
+
+      - name: Build plugins
+        run: |
+          npm run build --workspace=@yumyum-player/hevc-wasm
+          npm run build --workspace=@yumyum-player/pro-streaming
+          npm run build --workspace=@yumyum-player/transport-webrtc
