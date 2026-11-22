@@ -11,7 +11,7 @@ Yum-yum Player is an open-source browser video engine for HLS, WebRTC/WHEP and W
 | [`@yumyum-player/pro-streaming`](./packages/pro-streaming/README.md) | WebSocket transport and an FFmpeg server that remuxes RTSP into MPEG-TS |
 | [`@yumyum-player/hevc-wasm`](./packages/hevc-wasm/README.md) | Software HEVC decoding with WebAssembly and libde265 |
 
-React playback controls are available separately in [`@yumyums/ui`](https://www.npmjs.com/package/@yumyums/ui).
+React playback controls are available separately in [`@yumyum-player/ui`](https://www.npmjs.com/package/@yumyum-player/ui).
 
 ## Getting started
 

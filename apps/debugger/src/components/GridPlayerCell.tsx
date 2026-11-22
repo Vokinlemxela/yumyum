@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { YumYumPlayer, QualityLevel } from '@yumyum-player/core';
 import { hevcWasm } from '@yumyum-player/hevc-wasm';
 import { proStreaming } from '@yumyum-player/pro-streaming';
-import { Button, Spinner, Badge } from '@yumyums/ui';
+import { Button, Spinner, Badge } from '@yumyum-player/ui';
 import { Play, Pause, Volume2, VolumeX, X, Cpu, RefreshCw, Zap, Tv, Maximize2 } from 'lucide-react';
 import { toast } from 'sonner';
 

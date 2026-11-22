@@ -14,7 +14,7 @@
 | [`@yumyum-player/hevc-wasm`](./packages/hevc-wasm/README.ru.md) | Программное декодирование HEVC через WebAssembly и libde265 |
 
 Web-интерфейс плеера на React доступен в отдельном пакете
-[`@yumyums/ui`](https://www.npmjs.com/package/@yumyums/ui).
+[`@yumyum-player/ui`](https://www.npmjs.com/package/@yumyum-player/ui).
 
 ## Подключение
 

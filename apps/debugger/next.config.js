@@ -5,7 +5,7 @@ const nextConfig = {
   // and the remount then fails to get a WebGL2 context -> slow 2D fallback. An
   // internal debug tool doesn't need StrictMode.
   reactStrictMode: false,
-  transpilePackages: ['@yumyum-player/core', '@yumyums/ui', '@yumyum-player/hevc-wasm', '@yumyum-player/pro-streaming'],
+  transpilePackages: ['@yumyum-player/core', '@yumyum-player/ui', '@yumyum-player/hevc-wasm', '@yumyum-player/pro-streaming'],
   async headers() {
     return [
       {

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { YumYumPlayerView, type PlayerControlKey } from '@yumyums/ui';
+import { YumYumPlayerView, type PlayerControlKey } from '@yumyum-player/ui';
 import { X } from 'lucide-react';
 import { makeCreatePlayer } from '../lib/createDebuggerPlayer';
 

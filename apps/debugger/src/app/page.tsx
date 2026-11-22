@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { GridPlayerCell } from '../components/GridPlayerCell';
 import { TheaterPlayer } from '../components/TheaterPlayer';
-import { Badge, Spinner, Button, Input, Select } from '@yumyums/ui';
+import { Badge, Spinner, Button, Input, Select } from '@yumyum-player/ui';
 import { 
   Video, 
   Terminal, 

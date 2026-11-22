@@ -1,7 +1,7 @@
 import { YumYumPlayer } from '@yumyum-player/core';
 import { hevcWasm } from '@yumyum-player/hevc-wasm';
 import { proStreaming } from '@yumyum-player/pro-streaming';
-import type { PlayerHandle } from '@yumyums/ui';
+import type { PlayerHandle } from '@yumyum-player/ui';
 
 // Cache-bust HEVC-WASM assets per page load so dev rebuilds are never stale.
 const ASSET_VERSION = Date.now();
