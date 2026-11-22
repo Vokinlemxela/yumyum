@@ -1,54 +1,61 @@
+**English** · [Русский](https://github.com/Vokinlemxela/yumyum/blob/v1.1.1/packages/pro-streaming/README.ru.md)
+
 # @yumyum-player/pro-streaming
 
-Живой **WebSocket-стриминг сверхнизкой задержки** (суб-200мс) для
-[Yum-yum Player](../player-sdk), плюс **on-prem сервер перепаковки RTSP→MPEG-TS**.
+Low-latency live WebSocket streaming for [Yum-yum Player](../player-sdk/README.md), with an on-premises server that repackages RTSP as MPEG-TS. The WebSocket path targets sub-200 ms latency in suitable deployments. End-to-end latency depends on the source and network.
 
-Установка: `npm install @yumyum-player/core @yumyum-player/pro-streaming`.
+```sh
+npm install @yumyum-player/core @yumyum-player/pro-streaming
+```
 
-## Клиентский плагин
+## Client plugin
 
-Плагин регистрирует WebSocket-загрузчик для схем `ws://` и `wss://`.
+`proStreaming()` registers a loader for `ws://` and `wss://`. The loader hands the continuous MPEG-TS byte stream to the core demuxer through `STREAM_DEMUX`.
 
 ```ts
 import { YumYumPlayer } from '@yumyum-player/core';
 import { proStreaming } from '@yumyum-player/pro-streaming';
 
 const player = new YumYumPlayer({
-  canvas,
+  canvas: document.getElementById('player') as HTMLCanvasElement,
   plugins: [proStreaming()],
 });
-await player.load('ws://localhost:3002/?url=rtsp://camera/stream');
+
+const stream = new URL('ws://127.0.0.1:3002/');
+stream.searchParams.set('url', 'rtsp://camera/stream');
+await player.load(stream.href);
 ```
 
-Загрузчик принимает непрерывный поток байтов MPEG-TS и передаёт его демуксеру
-ядра (`STREAM_DEMUX`).
+## On-premises server (`server/ws-server.js`)
 
-## On-prem сервер (`server/ws-server.js`)
+The server uses FFmpeg to repackage an RTSP stream as MPEG-TS over WebSocket. It copies video packets with `-codec:v copy`, corrects timestamps from unstable IP cameras, and encodes the source audio as AAC when present.
 
-Перепаковывает RTSP-поток камеры в MPEG-TS поверх WebSocket через FFmpeg
-(`-codec:v copy`, без перекодирования) с коррекцией таймстемпов для нестабильных
-IP-камер.
+Run the server from a source checkout. This example binds it to loopback and allows the `camera` hostname used above.
 
-```bash
-WS_PORT=3002 npm run serve -w @yumyum-player/pro-streaming
-# или: node packages/pro-streaming/server/ws-server.js
+```sh
+WS_HOST=127.0.0.1 RTSP_ALLOWED_HOSTS=camera npm run serve -w @yumyum-player/pro-streaming
 ```
 
-По умолчанию сервер слушает порт 3002. Его можно изменить переменной
-`WS_PORT`. Чтобы ограничить адрес прослушивания, задайте `WS_HOST`.
-Требуются Node.js 18+ и FFmpeg 6+ в PATH.
+You can run the same file directly from the repository or an installed package.
 
-Важно: сервер работает **внутри сети самого заказчика** — камера, перепаковщик и
-браузер находятся на одном периметре, поэтому трафик его не покидает. Это делает
-его пригодным для закрытых / air-gapped развёртываний, где маршрутизация видео
-через внешнее облако запрещена.
+```sh
+WS_HOST=127.0.0.1 RTSP_ALLOWED_HOSTS=camera node packages/pro-streaming/server/ws-server.js
+WS_HOST=127.0.0.1 RTSP_ALLOWED_HOSTS=camera node node_modules/@yumyum-player/pro-streaming/server/ws-server.js
+```
 
-## Замечание по безопасности
+The server requires Node.js 18 or later and FFmpeg 6 or later. It checks the common Homebrew and `/usr/local/bin` locations for FFmpeg before falling back to `PATH`. `WS_PORT` sets the listening port and defaults to `3002`. `WS_HOST` sets the bind address.
 
-Сервер не выполняет аутентификацию и принимает любой `rtsp://`-адрес — он
-рассчитан на работу в доверенной внутренней сети, за собственным
-auth/ingress заказчика. Не выставляйте его напрямую в публичный интернет.
+With the camera, repackaging server and browser on the same network, video stays within that network. This works for isolated deployments.
 
-## Лицензия
+## Access controls
+
+| Setting | Behavior |
+|---|---|
+| `WS_AUTH_TOKEN` | When set, requires a matching `token` query parameter or an `Authorization: Bearer …` header. Browser WebSocket clients can use the query parameter. With an empty setting, any client that can reach the listening port can request a stream. |
+| `RTSP_ALLOWED_HOSTS` | Comma-separated list of allowed RTSP hostnames or IP addresses. With a configured list, only those hosts are accepted, including any internal camera you explicitly list. By default, the server rejects loopback, private, link-local and multicast IP literals. |
+
+Keep the repackager on a trusted network behind authenticated ingress. Restrict outbound access to your RTSP sources. FFmpeg resolves hostnames separately, so an RTSP hostname check is only one part of the network policy.
+
+## License
 
 [MIT](./LICENSE).

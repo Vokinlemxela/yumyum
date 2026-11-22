@@ -1,6 +1,6 @@
 {
   "name": "@yumyum-player/hevc-wasm",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Software HEVC/H.265 decoder for Yum-yum Player with a WebAssembly libde265 backend.",
   "license": "MIT AND LGPL-3.0-or-later",
   "type": "module",
@@ -23,6 +23,7 @@
     "dist",
     "worker",
     "README.md",
+    "README.ru.md",
     "LICENSE",
     "wasm/hevc.js",
     "wasm/hevc.wasm",

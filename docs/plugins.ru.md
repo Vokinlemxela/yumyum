@@ -1,5 +1,7 @@
 # Подключение модулей Yum-yum Player
 
+[English](./plugins.md) · Русский
+
 Ядро воспроизводит HLS и использует нативное декодирование браузера. Три бесплатных модуля добавляют программное декодирование HEVC, WebSocket и WebRTC/WHEP. Установите ядро и пакеты, которые нужны приложению.
 
 ```sh
@@ -35,7 +37,7 @@ await player.load('whep+https://media.example.com/camera/whep');
 `proStreaming()` регистрирует `ws://` и `wss://`. В монорепозитории RTSP-сервер запускается командой ниже. Требуются Node.js и FFmpeg в `PATH`.
 
 ```sh
-WS_PORT=3002 npm run serve -w @yumyum-player/pro-streaming
+WS_HOST=127.0.0.1 WS_PORT=3002 RTSP_ALLOWED_HOSTS=camera.local npm run serve -w @yumyum-player/pro-streaming
 ```
 
 Сервер перепаковывает видео из RTSP в MPEG-TS без перекодирования. В URL плеера передайте адрес камеры как query-параметр `url`.
@@ -47,8 +49,8 @@ stream.searchParams.set('codec', 'h265');
 await player.load(stream.href);
 ```
 
-Доступ к серверу контролируйте через сетевую конфигурацию и авторизованный вход. Сервер принимает RTSP-адрес от клиента и использует его как источник. [Настройка WebSocket](../packages/pro-streaming/README.ru.md).
+В этом примере сервер слушает loopback-интерфейс и разрешает подключение к `camera.local`. Для доступа из другой сети настройте адрес прослушивания, список разрешённых камер и аутентификацию. [Настройка WebSocket](../packages/pro-streaming/README.ru.md).
 
 ## WebRTC/WHEP
 
-`transportWebrtc()` подключается к совместимому WHEP-серверу, например MediaMTX. Схема `whep+https://` соответствует HTTPS, а `whep://` — HTTP. Для передачи кадров в WebCodecs браузер должен поддерживать Encoded Transform. При необходимости задайте ICE-серверы в `rtcConfig` и заголовки авторизации источника в `extraHeaders`. [Настройка WebRTC/WHEP](../packages/transport-webrtc/README.md).
+`transportWebrtc()` подключается к совместимому WHEP-серверу, например MediaMTX. Схема `whep+https://` соответствует HTTPS, а `whep://` — HTTP. Для передачи кадров в WebCodecs браузер должен поддерживать Encoded Transform. При необходимости задайте ICE-серверы в `rtcConfig` и заголовки авторизации источника в `extraHeaders`. [Настройка WebRTC/WHEP](../packages/transport-webrtc/README.ru.md).

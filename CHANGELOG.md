@@ -1,35 +1,32 @@
 # Changelog
 
-Все значимые изменения проекта Yum-yum Player.
+English · [Русский](./CHANGELOG.ru.md)
+
+## 1.1.1 — 2026-11-22
+
+The core and all three plugins now include complete English and Russian documentation. English is the default.
 
 ## 1.1.0 — 2026-11-22
 
-### Добавлено
+### Added
 
-- WebRTC/WHEP, WebSocket/RTSP и программный HEVC доступны как пакеты
-  движка с открытым исходным кодом. Для подключения плагинов ключи не нужны.
-- В комплект HEVC входят сборка libde265 1.1.3, исходники и лицензии
-  сторонних компонентов, а также скрипт пересборки.
+- WebRTC/WHEP, WebSocket/RTSP and software HEVC are available as free, open-source plugins. They can be used without license keys.
+- The HEVC package includes a libde265 1.1.3 build, its source, third-party license notices and a rebuild script.
 
-### Исправлено
+### Fixed
 
-- HLS-плеер разбирает fMP4-сегменты с `mdat` больше 5 МиБ, в том числе при
-  загрузке частей сегмента. Оборванный сегмент больше не мешает разбору
-  следующего. Для незавершённого `mdat` действует лимит 64 МиБ на буферизацию.
+- HLS playback handles fMP4 segments with an `mdat` larger than 5 MiB, including segments received in chunks. A truncated segment no longer disrupts the next one. Buffering an incomplete `mdat` is limited to 64 MiB.
 
 ## 1.0.0 — 2026-06-29
 
-Первый стабильный мажорный релиз. Включает адаптивное вещание, оптимизации рендеринга и повышенную отказоустойчивость.
+First stable major release, with adaptive streaming, rendering improvements and stream recovery.
 
-### Добавлено
-- **Адаптивный стриминг (ABR / Main-Sub)**: автоматическое и ручное переключение уровней качества на основе сетевой пропускной способности и производительности декодирования.
-- **Ограничение плотности потока (Density Limit)**: потолок качества при воспроизведении нескольких окон/сеток для предотвращения перегрузки канала.
-- **Отказоустойчивость и автоподключение (Реконнект 24/7)**: непрерывная работа плеера при разрывах соединений, автоматическое переподключение и восстановление декодеров без перезагрузки страницы.
-- **Единые аудио-видео часы (A/V Clock)**: монотонная синхронизация звука и видео, привязанная к аппаратному времени аудиовыхода для плавного воспроизведения.
-- **Мульти-камерный GPU-бюджет (WebGL Context Pooling)**: пул контекстов WebGL2 с автоматическим разжалованием неактивных плееров в 2D-режим для бесперебойного отображения больших видеостен (больше 8-16 камер).
-- **События плеера**:
-  - `qualitychange`: оповещение о переключении уровня качества.
-  - `signals`: события состояния потока (отсутствие сигнала, восстановление, ошибки).
-- **Метрики телеметрии**:
-  - `renderMode`: текущий режим отрисовки (`webgl` или `canvas2d`).
-  - `qualityMode`: текущий режим выбора качества (`auto` или `manual`).
+### Added
+
+- **Adaptive streaming (ABR).** The player can switch between main and sub streams automatically, based on network throughput and decode performance, or manually.
+- **Quality limits.** Applications can cap stream quality when several views share bandwidth and decoding resources.
+- **Continuous playback.** The player reconnects after interruptions and recovers decoders without reloading the page.
+- **A/V synchronization.** A monotonic clock tied to audio output time keeps video and audio in sync.
+- **WebGL context pooling.** Inactive players can fall back to 2D rendering so larger video walls can share a limited number of WebGL2 contexts.
+- **Player events.** `qualitychange` reports quality-level changes. `signals` reports signal loss, recovery and errors.
+- **Telemetry.** `renderMode` reports the rendering path and `qualityMode` reports automatic or manual quality selection.

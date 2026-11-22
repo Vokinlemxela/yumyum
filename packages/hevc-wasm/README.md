@@ -1,39 +1,45 @@
+**English** · [Русский](https://github.com/Vokinlemxela/yumyum/blob/v1.1.1/packages/hevc-wasm/README.ru.md)
+
 # @yumyum-player/hevc-wasm
 
-Универсальный **программный декодер HEVC / H.265** для [Yum-yum Player](../player-sdk).
-Проигрывает HEVC даже там, где у браузера **нет нативной поддержки** (Firefox,
-Linux, Chrome без аппаратного HEVC, старые устройства) — декодируя в WebAssembly.
+Software HEVC/H.265 decoder for [Yum-yum Player](../player-sdk/README.md). It decodes HEVC in WebAssembly on browsers and devices that lack native HEVC decoding.
 
-Установка: `npm install @yumyum-player/core @yumyum-player/hevc-wasm`.
+```sh
+npm install @yumyum-player/core @yumyum-player/hevc-wasm
+```
 
-## Как подключается
+## Getting started
 
-Бесплатное ядро поставляет нативный HEVC (где браузер его поддерживает). Когда
-нативный HEVC недоступен, `HEVCDecoder` ядра делегирует декодеру,
-зарегистрированному под ключом `h265-sw`. Этот пакет регистрирует именно его —
-через plugin-шов, без форков и правок ядра:
+`hevcWasm()` registers the software decoder as `h265-sw`. The core uses it when native HEVC decoding is unavailable or when you pass `forceSoftwareHevc: true` to the player.
+
+For a bundled web application, copy `wasm/hevc.js`, `wasm/hevc.wasm`, and `worker/decode-worker.js` from the installed package to a public directory. Keep `hevc.js` and `hevc.wasm` in the same directory. Create a `<canvas id="player">` element and pass the matching asset URLs to the plugin.
 
 ```ts
 import { YumYumPlayer } from '@yumyum-player/core';
 import { hevcWasm } from '@yumyum-player/hevc-wasm';
 
 const player = new YumYumPlayer({
-  canvas,
-  plugins: [hevcWasm()],
+  canvas: document.getElementById('player') as HTMLCanvasElement,
+  plugins: [
+    hevcWasm({ glueUrl: '/hevc/hevc.js', workerUrl: '/hevc/decode-worker.js' }),
+  ],
 });
 ```
 
-## Интерфейс бэкенда
+When the runtime can resolve the packaged WASM assets directly, `hevcWasm()` without arguments loads the bundled decoder on the main thread.
 
-Пакет связывает программный декодер с плеером:
+## Backend interface
 
-- плагин `hevcWasm()` и регистрацию `h265-sw`,
-- `WasmHevcDecoder`: жизненный цикл, ограниченную очередь NAL на прогрев модуля,
-  доставку кадров в плеер.
-
-Сам **кодек** — заменяемый `HevcWasmBackend` (см. `backend.ts`):
+The plugin integrates with Player by registering `h265-sw`. `WasmHevcDecoder` manages the decoder lifecycle, maintains a bounded NAL queue during startup, and delivers frames to the player. `HevcWasmBackend` defines the interchangeable codec implementation. [Backend types](./src/backend.ts).
 
 ```ts
+interface RgbaFrame {
+  width: number;
+  height: number;
+  pts: number;
+  data: Uint8Array;
+}
+
 interface HevcWasmBackend {
   init(): Promise<void>;
   decode(accessUnit: Uint8Array, pts: number): RgbaFrame | null;
@@ -42,53 +48,38 @@ interface HevcWasmBackend {
 }
 ```
 
-## WASM-бинарь (libde265)
+`decode()` takes one Annex B access unit with start codes and a presentation timestamp in microseconds. It returns a packed RGBA frame in display order, or `null` while the decoder needs more input. The returned frame carries its own display timestamp in microseconds.
 
-Бэкенд по умолчанию `createLibde265Backend()` использует сборку
-**libde265 1.1.3** (`wasm/hevc.{js,wasm}`), собранную `native/build.sh` (Emscripten).
-Это **однопоточная** сборка (без `-pthread`, фиксированная память
-`ALLOW_MEMORY_GROWTH=0`, `STACK_SIZE=8MB`) — выбрана ради стабильности после
-повреждения кучи при pthread + memory-growth во вложенных воркерах. Декодирование
-всё равно идёт **вне главного потока**, потому что режим воркера плагина
-(`workerUrl`) запускает весь кодек в Web Worker, сохраняя плавность UI.
+## WASM binary (libde265)
 
-Если приложение использует сборщик, разместите `wasm/hevc.js`, `wasm/hevc.wasm`
-и `worker/decode-worker.js` из установленного пакета среди статических файлов.
-Оставьте `hevc.js` и `hevc.wasm` в одном каталоге и передайте пути в плагин:
+The default `createLibde265Backend()` uses **libde265 1.1.3**. The `native/build.sh` script uses Emscripten to generate `wasm/hevc.js` and `wasm/hevc.wasm`. The bundled build is single-threaded with 256 MiB of fixed memory (`ALLOW_MEMORY_GROWTH=0`) and an 8 MiB stack. This configuration avoids heap corruption observed with pthreads and memory growth in nested workers. Providing both `workerUrl` and `glueUrl` runs the codec in a dedicated Web Worker, leaving the main thread available for the interface.
 
-```ts
-hevcWasm({ glueUrl: '/hevc/hevc.js', workerUrl: '/hevc/decode-worker.js' });
+### Browser isolation and threading
+
+The bundled build uses ordinary WebAssembly memory and works without `SharedArrayBuffer` or COOP/COEP headers. The `threads` option and the browser's `hardwareConcurrency` value do not change the decoder's thread count in this build.
+
+### Playback status
+
+The libde265 backend supports HEVC over HLS from uploaded files and RTSP-to-HLS repackaging. With some raw IP-camera feeds over low-latency WebSocket, the bundled decoder produces only IDR frames.
+
+### Rebuilding the binary
+
+Install Emscripten, CMake and Node.js. On macOS you can install Emscripten and CMake with Homebrew.
+
+```sh
+brew install cmake emscripten
 ```
 
-### Cross-origin isolation НЕ требуется
+Build from the repository root.
 
-Однопоточная сборка не использует `SharedArrayBuffer`, поэтому странице **не**
-нужна cross-origin isolation — заголовки COOP/COEP для HEVC-WASM не требуются.
-
-> Опция `threads` / `hardwareConcurrency` у `hevcWasm()` и
-> `createLibde265Backend()` сейчас не изменяет число потоков.
-
-### Статус
-
-HEVC по **HLS работает** (загруженные файлы и RTSP→HLS). **Путь WS низкой
-задержки** с некоторыми сырыми потоками IP-камер пока не полностью декодируется
-встроенной сборкой libde265 (выходят только IDR-кадры).
-
-### Пересборка бинаря
-
-```bash
+```sh
 npm run wasm -w @yumyum-player/hevc-wasm
 ```
-Требуются `emcc` + `cmake` в PATH (`brew install cmake emscripten`).
 
-### Свой бэкенд
+### Using a custom backend
 
-`HevcWasmBackend` заменяем, поэтому другой кодек-модуль можно подставить через
-`hevcWasm({ backend })` без изменения связки плагина.
+Pass your own `HevcWasmBackend` with `hevcWasm({ backend })`. This backend overrides worker mode and runs on the main thread.
 
-## Лицензии
+## Licenses
 
-Код интеграции с Player распространяется по [MIT](./LICENSE).
-Сборка [libde265](https://github.com/strukturag/libde265) распространяется по
-LGPL-3.0-or-later. Исходники и тексты лицензий этой сборки входят в каталог
-[`third-party`](./third-party).
+The Player integration code is licensed under [MIT](./LICENSE). The bundled [libde265](https://github.com/strukturag/libde265) build is distributed under LGPL-3.0-or-later. The package includes its source archive and license texts. [Third-party components](./third-party/README.md).

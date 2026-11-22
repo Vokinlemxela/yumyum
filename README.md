@@ -1,20 +1,19 @@
 # Yum-yum Player
 
-Открытый браузерный видеодвижок для HLS, WebRTC/WHEP и WebSocket. Движок
-декодирует видео через WebCodecs и выводит кадры в canvas через WebGL2.
-Все пакеты доступны бесплатно.
+English · [Русский](./README.ru.md)
 
-| Пакет | Возможности |
+Yum-yum Player is an open-source browser video engine for HLS, WebRTC/WHEP and WebSocket. It decodes video with WebCodecs and renders it to a canvas using WebGL2. The core and all three plugins are free to use.
+
+| Package | Features |
 | --- | --- |
-| [`@yumyum-player/core`](./packages/player-sdk) | HLS (MPEG-TS и fMP4), H.264, нативный HEVC, MJPEG, AAC, A/V-синхронизация |
-| [`@yumyum-player/transport-webrtc`](./packages/transport-webrtc) | Прямой эфир через WebRTC/WHEP |
-| [`@yumyum-player/pro-streaming`](./packages/pro-streaming) | WebSocket-транспорт и сервер перепаковки RTSP в MPEG-TS через FFmpeg |
-| [`@yumyum-player/hevc-wasm`](./packages/hevc-wasm) | Программное декодирование HEVC через WebAssembly и libde265 |
+| [`@yumyum-player/core`](./packages/player-sdk/README.md) | HLS (MPEG-TS and fMP4), H.264, native HEVC, MJPEG, AAC and A/V synchronization |
+| [`@yumyum-player/transport-webrtc`](./packages/transport-webrtc/README.md) | Live playback over WebRTC/WHEP |
+| [`@yumyum-player/pro-streaming`](./packages/pro-streaming/README.md) | WebSocket transport and an FFmpeg server that remuxes RTSP into MPEG-TS |
+| [`@yumyum-player/hevc-wasm`](./packages/hevc-wasm/README.md) | Software HEVC decoding with WebAssembly and libde265 |
 
-Web-интерфейс плеера на React доступен в отдельном пакете
-[`@yumyums/ui`](https://www.npmjs.com/package/@yumyums/ui).
+React playback controls are available separately in [`@yumyums/ui`](https://www.npmjs.com/package/@yumyums/ui).
 
-## Подключение
+## Getting started
 
 ```bash
 npm install @yumyum-player/core
@@ -29,14 +28,11 @@ await player.load('https://example.com/stream.m3u8');
 await player.play();
 ```
 
-Чтобы попробовать без потокового сервера, используйте `mock://h264`.
-Примеры подключения плагинов приведены в документации каждого пакета.
+To try playback without a streaming server, use `mock://h264`. Each package's README includes an example of how to connect its plugin.
 
-## Сборка
+## Building from source
 
-Требуются Node.js 22.12 или новее и npm 11. Для сервера RTSP и утилиты подготовки HLS нужен
-FFmpeg в PATH. Команда `npm run package` запускает исходную утилиту
-[`hls-packager`](./packages/hls-packager).
+Use Node.js 22.12 or later and npm 11. The RTSP server and the HLS packaging utility require FFmpeg on `PATH`. Run the [HLS packager](./packages/hls-packager) with `npm run package`.
 
 ```bash
 npm ci
@@ -45,12 +41,12 @@ npm run typecheck
 npm test
 ```
 
-## Примеры и диагностика
+## Examples and diagnostics
 
-[Руководство по модулям](docs/plugins.ru.md) показывает, как подключить WHEP, WebSocket и программный декодер HEVC. Для проверки локальных потоков соберите пакеты, затем запустите `npm run dev:debugger` и откройте `http://127.0.0.1:3003`. Отладчик использует FFmpeg для обработки RTSP и загруженных файлов.
+The [plugin guide](./docs/plugins.md) covers WHEP, WebSocket and software HEVC. To test local streams, build the packages, run `npm run dev:debugger` and open `http://127.0.0.1:3003`. The debugger uses FFmpeg to process RTSP streams and uploaded files.
 
-## Лицензии
+## Licensing
 
-Исходный код Player распространяется по [MIT](./LICENSE).
-Декодер libde265 распространяется по LGPL-3.0-or-later. Его исходники и тексты
-лицензий идут вместе с [HEVC-пакетом](./packages/hevc-wasm/third-party).
+Player's source code is available under the [MIT License](./LICENSE). The HEVC package includes libde265 under LGPL-3.0-or-later, along with its [source and license notices](./packages/hevc-wasm/third-party/README.md).
+
+[Changelog](./CHANGELOG.md)

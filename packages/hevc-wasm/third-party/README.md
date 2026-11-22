@@ -1,16 +1,18 @@
-# Компоненты HEVC-декодера
+**English** · [Русский](./README.ru.md)
 
-В `wasm/hevc.wasm` входит libde265 версии 1.1.3, выпущенная struktur AG под LGPL-3.0-or-later. В каталоге находятся полные исходники этой версии и тексты LGPL и GPL. Архив соответствует тегу `v1.1.3`, коммит `ba62bf4cfb3242f3bf0a45617ff09e35236e4d82`. [Исходники libde265](https://github.com/strukturag/libde265/tree/ba62bf4cfb3242f3bf0a45617ff09e35236e4d82)
+# HEVC decoder components
 
-Исполняемый модуль и загрузчик собраны Emscripten 5.0.7. Уведомления Emscripten, LLVM и musl приложены рядом. Обвязка Player распространяется под лицензией MIT из корня пакета.
+`wasm/hevc.wasm` includes libde265 1.1.3, released by struktur AG under LGPL-3.0-or-later. This directory contains the [complete source archive](./libde265-1.1.3.tar.gz) and the [LGPL](./COPYING.LESSER) and [GPL](./COPYING.GPLv3) license texts. The archive corresponds to tag `v1.1.3` at commit `ba62bf4cfb3242f3bf0a45617ff09e35236e4d82`. [Upstream libde265 sources](https://github.com/strukturag/libde265/tree/ba62bf4cfb3242f3bf0a45617ff09e35236e4d82).
 
-Для повторной сборки установите Emscripten, CMake и Node.js и выполните из каталога пакета:
+The executable module and its JavaScript loader were built with Emscripten 5.0.7. Notices for [Emscripten](./EMSCRIPTEN-LICENSE), [LLVM](./LLVM-LICENSE), and [musl](./MUSL-COPYRIGHT) are included here. The Player integration is covered by the package's [MIT license](../LICENSE). [HEVC WASM package documentation](../README.md).
+
+To rebuild, install Emscripten, CMake, and Node.js and run the following from the package directory.
 
 ```sh
 bash native/build.sh
 ```
 
-Чтобы использовать модифицированную библиотеку, передайте путь к её исходникам. Скрипт перелинкует декодер и запишет оба файла в `wasm/`.
+To use a modified libde265, pass the path to its sources. The script relinks the decoder and writes both `hevc.js` and `hevc.wasm` to `wasm/`.
 
 ```sh
 LIBDE265_SOURCE_DIR=/path/to/libde265 bash native/build.sh

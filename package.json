@@ -1,6 +1,6 @@
 {
   "name": "yumyum-player",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "description": "Yum-yum Player — open multi-codec browser engine with WebRTC/WHEP, WebSocket and HEVC software decoding.",
   "license": "MIT",

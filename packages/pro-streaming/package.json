@@ -1,6 +1,6 @@
 {
   "name": "@yumyum-player/pro-streaming",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Low-latency WebSocket live streaming and on-premises RTSP to MPEG-TS repackaging for Yum-yum Player.",
   "license": "MIT",
   "type": "module",
@@ -24,6 +24,7 @@
     "dist",
     "server",
     "README.md",
+    "README.ru.md",
     "LICENSE"
   ],
   "sideEffects": false,

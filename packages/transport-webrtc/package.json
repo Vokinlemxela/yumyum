@@ -1,6 +1,6 @@
 {
   "name": "@yumyum-player/transport-webrtc",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Low-latency WebRTC/WHEP transport for Yum-yum Player via WebRTC Encoded Transform.",
   "license": "MIT",
   "type": "module",
@@ -22,6 +22,7 @@
   "files": [
     "dist",
     "README.md",
+    "README.ru.md",
     "LICENSE"
   ],
   "sideEffects": false,

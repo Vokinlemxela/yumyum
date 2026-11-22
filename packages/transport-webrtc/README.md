@@ -1,14 +1,18 @@
+**English** · [Русский](https://github.com/Vokinlemxela/yumyum/blob/v1.1.1/packages/transport-webrtc/README.ru.md)
+
 # @yumyum-player/transport-webrtc
 
-Низколатентный транспорт WebRTC/WHEP для [Yum-yum Player](../../README.md).
-Получает закодированное видео через **Encoded Transform** и передаёт его
-конвейеру WebCodecs и WebGL.
+Low-latency WebRTC/WHEP transport for [Yum-yum Player](../player-sdk/README.md). It receives encoded video through Encoded Transform and sends it through the player's WebCodecs and WebGL pipeline.
 
-Установка: `npm install @yumyum-player/core @yumyum-player/transport-webrtc`.
+```sh
+npm install @yumyum-player/core @yumyum-player/transport-webrtc
+```
 
-## Подключение
+## Getting started
 
-```typescript
+Create a `<canvas id="player">` element and point the player at a WHEP endpoint such as MediaMTX.
+
+```ts
 import { YumYumPlayer } from '@yumyum-player/core';
 import { transportWebrtc } from '@yumyum-player/transport-webrtc';
 
@@ -17,80 +21,68 @@ const player = new YumYumPlayer({
   plugins: [transportWebrtc()],
 });
 
-// The plugin converts the WHEP URL into an HTTP POST request.
 await player.load('whep://localhost:8889/camera/whep');
 ```
 
-## Схемы URL
+## URL schemes
 
-| Схема | Транспорт | Назначение |
-|--------|-----------|-------------|
-| `whep://host/path` | HTTP | Локальная разработка |
-| `whep+https://host/path` | HTTPS | Соединение с TLS |
+| Scheme | Endpoint transport | Typical use |
+|---|---|---|
+| `whep://host/path` | HTTP | Local development |
+| `whep+https://host/path` | HTTPS | Connection over TLS |
 
-## Передача данных
+The plugin converts the URL scheme before sending the WHEP request. For a cross-origin endpoint, enable CORS for your application's origin and expose the `Location` response header so the loader can close the remote session.
 
-```
-┌─────────────┐     POST SDP      ┌──────────────┐
-│  WHEPLoader │ ──────────────► │ WHEP Endpoint │
-│             │ ◄────────────── │  (MediaMTX)   │
-│             │     SDP Answer    └──────────────┘
-│             │
-│  ontrack ───┼─► Encoded Transform ─► onMockPacket ─► WebCodecs Decoder ─► WebGL
-│  (video)    │   (insertable streams)                                      Canvas
-│             │
-│  ontrack ───┼─► MediaStream ─► AudioContext ─► Speakers
-│  (audio)    │   (native decode)
-└─────────────┘
+## Data flow
+
+```text
+WHEPLoader ── POST SDP offer ──► WHEP endpoint
+           ◄── SDP answer ──────
+
+Video track → Encoded Transform → onMockPacket → WebCodecs → WebGL canvas
+Audio track → MediaStream       → AudioContext             → audio output
 ```
 
-1. Плагин отправляет SDP offer запросом POST к WHEP-эндпоинту и получает SDP answer.
-2. Видео передаётся из Encoded Transform в WebCodecs через `onMockPacket`.
-3. Аудио воспроизводится через `MediaStream` и `AudioContext`.
-4. После потери ICE-соединения плагин переподключается с экспоненциальной задержкой.
+1. The loader sends the SDP offer to the WHEP endpoint using HTTP POST and applies the SDP answer to the peer connection.
+2. Encoded video frames enter the player through `onMockPacket` and go directly to the decoder.
+3. The browser decodes audio and plays it through `MediaStream` and `AudioContext`.
+4. When the server provides a session URL in `Location`, the loader sends `DELETE` to that URL when the connection closes. The loader can reconnect after an ICE connection failure.
 
-## Параметры
+## Options
 
-```typescript
+```ts
 transportWebrtc({
-  connectTimeoutMs: 10_000,         // Default: 10s
-  extraHeaders: {                   // Custom HTTP headers for WHEP requests
-    'Authorization': 'Bearer token',
-  },
-  rtcConfig: {                      // RTCConfiguration override
+  connectTimeoutMs: 10_000,
+  extraHeaders: { Authorization: 'Bearer YOUR_TOKEN' },
+  rtcConfig: {
     iceServers: [{ urls: 'stun:stun.example.com:3478' }],
   },
 });
 ```
 
-## Поддержка браузеров
+| Option | Purpose |
+|---|---|
+| `connectTimeoutMs` | Timeout for the HTTP POST to the WHEP endpoint. The default is 10 seconds. |
+| `extraHeaders` | Additional headers for WHEP `POST` and `DELETE` requests, including endpoint authentication. |
+| `rtcConfig` | Overrides `RTCConfiguration`, including ICE servers and transport policy. The default STUN server is `stun:stun.l.google.com:19302`. |
 
-| API | Chrome | Edge | Firefox | Safari |
-|---------|--------|------|---------|--------|
-| Encoded Transform (`createEncodedStreams`) | 86+ | 86+ | ✗ | ✗ |
-| `RTCRtpScriptTransform` | 110+ | 110+ | 117+ | 15.4+ |
+## Browser requirements
 
-Плагин автоматически выбирает доступный API.
+Use a browser with WebRTC, WebCodecs and support for encoded video transforms. The exported `detectEncodedTransformSupport()` returns `script-transform` when `RTCRtpScriptTransform` is available, `encoded-streams` when `RTCRtpReceiver.prototype.createEncodedStreams` is available, or `null` otherwise. The loader uses `createEncodedStreams()` when the receiver provides it. The script-transform path creates a module worker from a Blob URL, which the page's Content Security Policy must permit.
 
-## Поддержка кодеков
+## Codec support
 
-| Кодек | Поддержка |
-|-------|--------|
-| **H.264** | По умолчанию для WHEP и WebRTC |
-| **H.265 (HEVC)** | Ограничена возможностями браузера и сервера |
+| Codec | Requirements |
+|---|---|
+| H.264 | The player's default decoder. The browser and server must negotiate and support the H.264 profile. |
+| H.265 (HEVC) | The browser and WHEP server must negotiate HEVC. For an HEVC source, add `?codec=h265` to the WHEP URL to select the HEVC decoder in Player. |
 
-## Ошибки и переподключение
+## Errors and reconnection
 
-Плагин сообщает об ошибках через событие плеера `on('error', …)`.
-Примеры сообщений:
+The plugin reports errors through the player's `error` event, which you can subscribe to with `player.on('error', handler)`. For example, the browser may lack Encoded Transform, or the WHEP endpoint may return a 4xx or 5xx status.
 
-- `Browser does not support Encoded Transform`
-- `WHEP endpoint returned 4xx/5xx`
+After an established connection loses ICE, reconnection attempts continue until the application closes the transport. The loader uses capped exponential backoff with jitter. To fall back to HLS, handle the error in your application and load the HLS source.
 
-После потери ICE-соединения попытки продолжаются до закрытия сессии.
-Между попытками действует экспоненциальная задержка с верхним пределом и
-случайной добавкой. Приложение может обработать ошибку и переключиться на HLS.
-
-## Лицензия
+## License
 
 [MIT](./LICENSE).

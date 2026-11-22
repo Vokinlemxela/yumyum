@@ -1,33 +1,20 @@
 # @yumyum-player/core
 
-> Мультикодек-видеодвижок для браузера со сверхнизкой задержкой.
-> Аппаратное декодирование (WebCodecs) + рендеринг на WebGL2, с plugin-швом для расширений.
+**English** · [Русский](https://github.com/Vokinlemxela/yumyum/blob/v1.1.1/packages/player-sdk/README.ru.md)
 
-`@yumyum-player/core` — **бесплатное ядро Yum-yum Player под лицензией MIT**. Оно
-декодирует видео аппаратными декодерами браузера (WebCodecs) и рендерит прямо в
-`<canvas>` через WebGL2. Проигрывает **HLS** «из коробки» и содержит
-самодостаточные демуксер и аудио-конвейер — никаких дополнительных файлов
-размещать не нужно.
+Yum-yum Player is a browser video engine for live streams and archives. The MIT-licensed core plays HLS on a canvas, demuxes MPEG-TS and fragmented MP4 (fMP4), and synchronizes video with audio. Free, open-source plugins add software HEVC decoding, WebSocket streaming and WebRTC/WHEP. [Engine plugins](#engine-plugins)
 
-Всё, что описано здесь, **бесплатно и работает автономно**. Опциональные
-коммерческие дополнения (универсальный программный HEVC, WS-стриминг низкой
-задержки) подключаются через тот же публичный plugin-шов — см.
-**[Плагины движка](#плагины-движка)**.
-
----
-
-## Установка
+## Installation
 
 ```bash
 npm install @yumyum-player/core
 ```
 
-Самодостаточно: демуксер MPEG-TS/fMP4 (Web Worker) и PCM-аудио-ворклет встроены
-как Blob на этапе сборки — копировать/раздавать дополнительные файлы не нужно.
+The package embeds its demux worker and PCM audio worklet as Blob sources. Installing the core supplies both.
 
----
+## Quick start
 
-## Быстрый старт
+Add a `<canvas></canvas>` to the page, then load a playlist and start playback.
 
 ```ts
 import { YumYumPlayer } from '@yumyum-player/core';
@@ -39,145 +26,126 @@ await player.load('https://example.com/stream.m3u8');
 await player.play();
 ```
 
-Можно попробовать без сервера, на встроенных синтетических потоках:
-`player.load('mock://h264')` (также работают `mock://hevc`, `mock://mjpeg`).
+For a local demo without a media server, replace the playlist URL with `mock://h264`, `mock://hevc` or `mock://mjpeg`.
 
----
+## Core capabilities
 
-## Что поддерживает бесплатное ядро
-
-| Область | Поддержка |
+| Area | Support |
 |---|---|
-| Видео (аппаратно, WebCodecs) | **H.264 / AVC**, **HEVC / H.265** *(там, где браузер декодирует нативно)*, **MJPEG** |
-| Аудио | **AAC** — нативный `AudioDecoder` с двойной стратегией (raw-frame + ADTS) и Web Audio (`decodeAudioData`) fallback для браузеров без нативного AAC; ресемплированный PCM играется через `AudioWorklet` |
-| Транспорт | **HLS** (сегменты MPEG-TS *и* fMP4), тестовые потоки `mock://` |
-| Рендеринг | **WebGL2** YUV-шейдеры, авто-фолбэк на 2D-canvas |
-| A/V-синхронизация | мастер-часы привязаны к аппаратному времени аудио (гладкие, монотонные) |
-| Устойчивость | hot-recovery декодера и смена профиля (SPS/PPS), backpressure очереди кадров, валидация сегментов по синхробайту MPEG-TS, восстановление к live-краю |
+| Video | H.264/AVC and HEVC/H.265 through the browser's WebCodecs decoders. MJPEG frames are decoded with `createImageBitmap`. |
+| Audio | AAC through `AudioDecoder` using raw frames or ADTS. When native AAC decoding is unavailable, the player tries Web Audio `decodeAudioData`. An `AudioWorklet` plays PCM. |
+| Sources | HLS with MPEG-TS or fMP4 segments, progressive fragmented MP4, and built-in `mock://` streams. The demuxer extracts video access units and AAC audio. |
+| Rendering | WebGL2 supports YUV rendering. A 2D canvas fallback is available. |
+| A/V synchronization | The playback clock follows the audio clock when available. |
+| Recovery | Decoder recovery and profile changes, frame-queue backpressure, MPEG-TS sync-byte checks, and catch-up to the live edge. |
 
-Демуксинг MPEG-TS/fMP4 (включая извлечение AAC-аудио и H.264/HEVC NAL-юнитов)
-**полностью в бесплатном ядре**. Живой WebSocket-транспорт (`ws://`/`wss://`) и
-универсальный программный HEVC — **коммерческие дополнения**; без плагина
-стриминга `ws://`-URL отклоняются понятной ошибкой-апселлом.
+## Configuration
 
----
-
-## Конфигурация
+Only `canvas` is required. This example limits video processing and rendering to 8 fps for a grid cell. Omit the frame-rate limits for normal playback. The `lowPower` preset defaults both limits to 8 fps and reduces the frame queue.
 
 ```ts
 new YumYumPlayer({
-  canvas,                       // обязательный HTMLCanvasElement
-  volume: 0.8,                  // 0..1, по умолчанию 1
-  muted: false,                 // по умолчанию false
-  placeholderStyle: 'black',    // 'black' | 'no-signal' | 'none' — при потере сигнала
-  logLevel: 'silent',           // 'silent' | 'error' | 'warn' | 'info' | 'debug'
-  forceSoftwareHevc: false,     // предпочесть зарегистрированный 'h265-sw' нативному HEVC
-  targetFps: 8,                 // пропускать кадры для достижения целевой частоты (FPS), по умолчанию: undefined (выкл)
-  renderFps: 8,                 // ограничить частоту цикла рендеринга, по умолчанию: undefined (выкл)
-  lowPower: false,              // пресет для экономичных настроек плиток сетки (targetFps=8, renderFps=8, минимальный буфер)
-  plugins: [],                  // модули-расширения (см. Плагины / Коммерческие дополнения)
+  canvas,                     // Required HTMLCanvasElement
+  volume: 0.8,                // Range 0–1, default 1
+  muted: false,               // Start muted if true
+  placeholderStyle: 'black',  // 'black' (default), 'no-signal', or 'none'
+  logLevel: 'silent',         // 'silent' (default), 'error', 'warn', 'info', or 'debug'
+  forceSoftwareHevc: false,   // Prefer a registered h265-sw decoder if true
+  targetFps: 8,               // Limit video frame processing
+  renderFps: 8,               // Limit the render loop independently
+  lowPower: false,            // Use the low-power grid preset if true
+  plugins: [],                // Install decoder or transport plugins
 });
 ```
-
----
 
 ## API
 
 ```ts
-// Жизненный цикл
-await player.load(url);        // HLS .m3u8, mock://h264|hevc|mjpeg (ws://, WHEP требуют плагинов)
+// Playback
+await player.load(url);
 await player.play();
 player.pause();
-player.seek(seconds);          // no-op на live-потоках
-player.destroy();              // освобождает worker, декодеры, WebGL и аудио
+player.seek(seconds);                     // For seekable sources
+player.state;                             // PlayerLifecycleState
 
-// Аудио и разблокировка
-player.setVolume(0.5);         // 0..1
+// Audio and speed
+player.setVolume(0.5);
 player.mute(true);
-await player.unlockAudio();    // явно пытается разблокировать Web Audio Context по жесту пользователя
+await player.unlockAudio();               // Call from a user gesture
+player.setPlaybackRate(1.5);
+player.getPlaybackRate();
+player.setLowPower(true);
 
-// Скорость и Экономичный режим
-player.setPlaybackRate(1.5);   // масштабирует мастер-часы; на ≠ 1× звук приглушается
-player.getPlaybackRate();      // → number
-player.setLowPower(true);      // динамически переключает экономичный режим lowPower
+// Quality and adaptive bitrate (ABR)
+player.getQualityLevels();                // QualityLevel[]
+player.getActiveQuality();                // 'auto' or the loader's selected ID
+player.getActiveRenditionKind();          // 'main', 'sub', or null
+await player.setQuality('sub');           // A level ID, 'main', 'sub', or 'auto'
+player.getQualityMode();                  // 'auto' or 'manual'
+player.setQualityMode('auto');
+player.getMaxQualityKind();               // 'main', 'sub', or null
+player.setMaxQualityKind('sub');          // Pass null to remove the ceiling
 
-// Качество и ABR (авто-битрейт)
-player.getQualityLevels();     // → QualityLevel[] { id, name, resolution, width, height, bitrate, kind: 'main' | 'sub' }
-player.getActiveQuality();     // → активный ID уровня качества или 'auto'
-await player.setQuality('sub');// установить уровень качества по ID, алиасу ('main' | 'sub') или 'auto'
-player.getQualityMode();       // → 'auto' | 'manual'
-player.setQualityMode('auto'); // установить режим ABR
-player.getMaxQualityKind();    // → 'main' | 'sub' | null
-player.setMaxQualityKind('sub');// ограничить верхнюю планку ABR (напр. для лимитов плотности сетки)
+// Timeline, archive coverage and diagnostics
+player.getCurrentTime();                  // Media time in seconds
+player.getDuration();                     // Infinity for live streams
+player.getBufferedEnd();                  // Furthest buffered media position in seconds
+player.isBuffering();                     // True while stalled for data
+player.getWallClockTime();                // Unix milliseconds, or null
+player.seekToWallClock(wallMs);           // True if the loader accepted the seek
+player.getCoverage();                     // WallClockRange or null
+player.getTelemetry();                    // PlayerTelemetry
 
-// Время, таймлайн и покрытие
-player.getCurrentTime();       // секунды (мастер-часы)
-player.getDuration();          // секунды (Infinity для live)
-player.getBufferedEnd();       // самая дальняя забуференная позиция (с)
-player.isBuffering();          // → boolean (true, если воспроизведение в данный момент приостановлено из-за буферизации)
-player.getWallClockTime();     // → number | null (абсолютное астрономическое время в мс из PROGRAM-DATE-TIME)
-player.seekToWallClock(ms);    // → boolean (переход на абсолютное астрономическое время в мс)
-player.getCoverage();          // → WallClockRange { startMs, endMs, gaps: { startMs, endMs }[] } | null
-player.getTelemetry();         // поля ниже
-player.state;                  // 'IDLE' | 'LOADING' | 'LOADED' | 'PLAYING' | 'PAUSED' | 'DESTROYED'
+// Subscribe and unsubscribe with the same callback
+const onQuality = (id: unknown) => console.log('Quality changed:', id);
+player.on('qualitychange', onQuality);
+player.off('qualitychange', onQuality);
 
-// События
-// Поддерживаются: 'play', 'pause', 'ended', 'error', 'waiting' (буферизация),
-// 'playing' (восстановление после буферизации), 'qualitychange', 'signals', 'renderfallback'
-player.on('qualitychange', (id) => console.log('Качество изменено на:', id));
-player.off(event, cb);
+player.destroy();                         // Release workers, decoders, renderer and audio
 ```
 
-`getTelemetry()` возвращает:
+- **Playback.** The lifecycle states are `IDLE`, `LOADING`, `LOADED`, `PLAYING`, `PAUSED` and `DESTROYED`. Live sources ignore seeks. Playback speed snaps to a supported rate. Audio is muted at speeds other than 1× and the user's mute preference is restored at 1×.
+- **Quality.** Each `QualityLevel` has `id`, `label`, `url` and `kind`. A loader may also supply `width`, `height`, `fps`, `bitrateKbps` and `codecs`. `getQualityLevels()` returns an empty array when the loader offers no levels. The quality ceiling applies to automatic and manual selection.
+- **Archive time.** When a playlist provides `EXT-X-PROGRAM-DATE-TIME`, the player can map media time to wall-clock time. `WallClockRange` contains `startMs`, `endMs` and `gaps`, each gap with its own `startMs` and `endMs`.
+- **Events.** Subscribe to `play`, `pause`, `ended`, `error`, `waiting`, `playing`, `qualitychange`, `signals` and `renderfallback`. The `waiting` and `playing` events mark the start and end of buffering.
 
-```ts
-{
-  activeCodec, decodingStrategy,        // напр. 'h264' | 'h265' | 'mjpeg', 'WebCodecs (GPU)' | 'WASM Fallback'
-  playbackState, playbackRate,
-  currentPTS, duration, bufferedEnd,
-  renderedFrames, droppedFrames, decodedFrames,
-  effectiveFps, queueLength,
-  backpressureActive,
-  throughputKbps,                       // сетевая пропускная способность в Kbps (EWMA)
-  qualityMode,                          // 'auto' | 'manual'
-  lastSwitchReason,                     // напр. 'throughput_drop', 'low_power_restriction'
-  maxAllowedKind,                       // 'main' | 'sub' | null
-  renderMode,                           // режим рендеринга ('WebGL2' | '2D fallback')
-  connectionState,                      // статус подключения лоадера ('connected' | 'reconnecting' | 'disconnected')
-  lastError,
-}
-```
+### Telemetry
 
-`MultiCodecPlayer` экспортируется как алиас `YumYumPlayer` для обратной совместимости.
+`getTelemetry()` returns a `PlayerTelemetry` snapshot. Some fields depend on the active loader or playback diagnostics.
 
-### Подсказки кодека
+| Fields | Meaning |
+|---|---|
+| `activeCodec`, `decodingStrategy`, `renderMode` | Video codec, decoder path and renderer. Decoder labels include `WebCodecs (GPU)`, `WASM Fallback` and `ImageBitmap (CPU)`. Renderer modes include `webgl` and `2d-fallback`. |
+| `playbackState`, `playbackRate`, `currentPTS`, `duration`, `bufferedEnd` | Playback state, speed and media positions in seconds. |
+| `renderedFrames`, `droppedFrames`, `decodedFrames`, `effectiveFps` | Frame counts and effective rendering rate. |
+| `queueLength`, `backpressureActive` | Number of queued frames and whether backpressure is active. |
+| `throughputKbps`, `qualityMode`, `lastSwitchReason`, `maxAllowedKind` | Smoothed throughput in kilobits per second, ABR mode, reason for the latest switch and the quality ceiling. |
+| `connectionState`, `lastError` | Loader-specific connection state and the latest error message, when available. |
 
-Если HLS/WS-URL не раскрывает кодек, добавьте подсказку, чтобы выбрать нужный
-декодер. Используйте **query-параметр**, а не `#fragment` (WebSocket-URL
-запрещают фрагменты):
+`MultiCodecPlayer` is an alias for `YumYumPlayer` for compatibility with existing integrations.
 
-```
+### Codec hints
+
+If an HLS or WebSocket URL needs an explicit decoder hint, use a query parameter. WebSocket URLs cannot contain a fragment. The player recognizes `codec=h265`, `codec=hevc` and `codec=mjpeg`. H.264 is the default.
+
+```text
 /live/stream.m3u8?codec=h265
 ```
 
-`mock://hevc`, `mock://mjpeg`, `mock://h264` определяются автоматически.
+The built-in `mock://h264`, `mock://hevc` and `mock://mjpeg` sources select their codec automatically.
 
----
+## Plugin API
 
-## Плагины (шов расширения)
-
-Плеер не «зашивает» опциональные декодеры/транспорты — они регистрируются через
-небольшой публичный plugin-API. Плагин добавляет **декодер** (под ключом кодека)
-и/или **загрузчик** (под схемами URL):
+A plugin registers a decoder by codec key or a loader by URL scheme. In this example the application supplies `MyHevcDecoder` and `MyLoader`.
 
 ```ts
-import type { PlayerPlugin } from '@yumyum-player/core';
+import { YumYumPlayer, type PlayerPlugin } from '@yumyum-player/core';
+import { MyHevcDecoder, MyLoader } from './my-backends.js';
 
 export function myPlugin(): PlayerPlugin {
   return {
     name: 'my-plugin',
     install(ctx) {
-      // ctx.logger; в фабрики передаются deps: { onFrame, onError, logger }
       ctx.registerDecoder('h265-sw', (deps) => new MyHevcDecoder(deps));
       ctx.registerLoader(['ws', 'wss'], (deps) => new MyLoader(deps));
     },
@@ -187,40 +155,25 @@ export function myPlugin(): PlayerPlugin {
 new YumYumPlayer({ canvas, plugins: [myPlugin()] });
 ```
 
-Как работает маршрутизация:
+Decoder factories receive `onFrame`, `onError` and `logger`. Loader factories receive `LoaderDeps`, including `onData` and `logger`. The plugin itself can log through `ctx.logger`.
 
-- **Декодеры** ключуются по кодеку (`'h264'`, `'h265'`, `'mjpeg'`, `'aac'`). Когда
-  нативный HEVC недоступен (или `forceSoftwareHevc: true`), HEVC-декодер ядра
-  делегирует декодеру, зарегистрированному под `'h265-sw'`. Ключ маршрутизации
-  демуксера (`'h265'`) не меняется — меняется только то, *чем* декодируются кадры.
-- **Загрузчики** ключуются по схеме URL. Ядро регистрирует загрузчик HLS/`mock`;
-  плагин может зарегистрировать `ws`/`wss`. `load(url)` выбирает загрузчик по схеме.
+- **Decoders.** The core routes `h264`, `h265`, `mjpeg` and `aac`. When native HEVC is unavailable or `forceSoftwareHevc` is set, the HEVC decoder delegates to the registered `h265-sw` decoder.
+- **Loaders.** The built-in loader handles HLS, progressive fMP4 and mock streams. `load(url)` selects a registered loader for the URL scheme. Install the corresponding plugin before loading a WebSocket or WHEP URL.
 
-Экспортируемые контракты: `PlayerPlugin`, `PluginContext`, `DecoderFactory`,
-`DecoderDeps`, `IBaseDecoder`, `IStreamLoader`, `LoaderFactory`, `LoaderDeps`,
-`LoaderKind`, `DecodedFrame`, `YUVFrameData`, `Segment`, `Logger`, `LogLevel`.
+Public contracts include `PlayerPlugin`, `PluginContext`, `DecoderFactory`, `DecoderDeps`, `IBaseDecoder`, `IStreamLoader`, `LoaderFactory`, `LoaderDeps`, `LoaderKind`, `DecodedFrame`, `YUVFrameData`, `Segment`, `Logger` and `LogLevel`.
 
----
+## Engine plugins
 
-## Плагины движка
+| Package | Use |
+|---|---|
+| [@yumyum-player/transport-webrtc](../transport-webrtc/README.md) | `transportWebrtc()` adds live WebRTC/WHEP over `whep://` and `whep+https://`. |
+| [@yumyum-player/hevc-wasm](../hevc-wasm/README.md) | `hevcWasm()` registers the `h265-sw` software HEVC decoder. See the package instructions for hosting its WASM assets. |
+| [@yumyum-player/pro-streaming](../pro-streaming/README.md) | `proStreaming()` installs the `ws://` and `wss://` loader. The package also includes an RTSP-to-MPEG-TS WebSocket server. |
 
-- [WebRTC/WHEP](../transport-webrtc) подключает транспорт прямого эфира
-  через `whep://` и `whep+https://`.
-- [Программный HEVC/H.265](../hevc-wasm) регистрирует декодер `h265-sw`
-  для браузеров без нативного HEVC. Плеер также выбирает его при
-  `forceSoftwareHevc: true`.
-- [WebSocket и RTSP](../pro-streaming) добавляет загрузчик `ws://` / `wss://`
-  и сервер RTSP→MPEG-TS.
+## Browser support
 
-## Поддержка браузеров
+Use HTTPS or localhost for WebCodecs and audio worklets. The core needs a canvas and Web Workers. Native H.264 and HEVC playback depend on `VideoDecoder` support for the stream's codec and profile, which varies by browser and device. The HEVC plugin provides a software decoder. AAC playback can fall back to Web Audio. For audible playback, call `unlockAudio()` from a user gesture if the browser suspends the audio context.
 
-Требуются `WebCodecs` (`VideoDecoder`/`AudioDecoder`), `Web Workers` и canvas
-(предпочтительно WebGL2, есть 2D-фолбэк). Chrome/Edge 94+, свежий Safari. Какие
-кодеки браузер декодирует нативно — зависит от платформы; в бесплатном ядре
-**HEVC только аппаратный/нативный** — для универсального HEVC используйте
-дополнение `@yumyum-player/hevc-wasm`. Браузеры без нативного AAC автоматически
-переходят на Web Audio-декодирование.
+## License
 
-## Лицензия
-
-MIT — см. [LICENSE](./LICENSE).
+The core is distributed under the [MIT License](./LICENSE).
