@@ -179,3 +179,29 @@ describe('fMP4 demux worker', () => {
     expectVideo(videos[0], keyframe, 0, true);
   });
 });
+
+describe('video sample descriptions', () => {
+  it('identifies HEVC in an unhinted playlist and returns to AVC on the next init', () => {
+    const worker = startWorker();
+    const hevcInit = Buffer.from(init);
+    const entry = hevcInit.indexOf('avc1', moovOffset);
+    const configuration = hevcInit.indexOf('avcC', entry);
+    expect(entry).toBeGreaterThan(0);
+    expect(configuration).toBeGreaterThan(entry);
+    hevcInit.write('hvc1', entry, 'ascii');
+    hevcInit.write('hvcC', configuration, 'ascii');
+    const record = configuration + 4;
+    hevcInit.fill(0, record, record + 23);
+    hevcInit.set([1, 1, 0x60, 0, 0, 0, 0x80], record);
+    hevcInit[record + 12] = 150;
+    hevcInit[record + 21] = 3;
+    const irap = Buffer.from([0, 0, 0, 3, 0x26, 1, 0x80]);
+    const h = fragment(1, 0, irap);
+    worker.send('DEMUX', Buffer.concat([hevcInit, h.moof, h.mdat]));
+    expect(worker.messages[0]).toMatchObject({ type: 'VIDEO', codec: 'h265', parsedCodec: 'hvc1.1.6.L150.80', isKeyframe: true });
+    expect(worker.messages[0]).toHaveProperty('description');
+    const a = fragment(2, 250, keyframe);
+    worker.send('DEMUX', Buffer.concat([init, a.moof, a.mdat]));
+    expect(worker.messages[1]).toMatchObject({ type: 'VIDEO', codec: 'h264', parsedCodec: 'avc1.42c033' });
+  });
+});

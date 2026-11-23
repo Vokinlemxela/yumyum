@@ -664,6 +664,22 @@ segment_0.ts
     vi.restoreAllMocks();
   });
 
+  it('keeps the smaller HD variant as the substream when its bitrate is higher', async () => {
+    const variants = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=3780000,RESOLUTION=3840x2160\na.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=3950000,RESOLUTION=1920x1080\nb.m3u8';
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async url => new Response(
+      String(url).endsWith('master.m3u8') ? variants : '#EXTM3U\n#EXTINF:1,\nseg.ts\n#EXT-X-ENDLIST'
+    ));
+    const loader = makeLoader(() => {});
+    try {
+      await loader.load('https://example.com/master.m3u8');
+      expect(loader.getLevels().find(level => level.height === 1080)?.kind).toBe('sub');
+      expect(loader.getLevels().find(level => level.height === 2160)?.kind).toBe('main');
+    } finally {
+      loader.destroy();
+      vi.restoreAllMocks();
+    }
+  });
+
   it('switches quality levels and reloads media playlist accordingly', async () => {
     const masterPlaylist = `
 #EXTM3U

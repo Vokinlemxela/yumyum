@@ -670,6 +670,7 @@ export class YumYumPlayer {
           }
 
           if (type === 'VIDEO') {
+            this.activeCodec = codec;
             if (!shouldDecodeFrame(this.getPlaybackRate(), isKeyframe)) {
               return; // Discard non-keyframes at high speed (>= 4x) to unload the decoder
             }

@@ -346,8 +346,13 @@ export class StreamLoader implements IStreamLoader, QualitySource {
             if (lvl.kind === 'sub') hasSub = true;
             if (lvl.kind === 'main') hasMain = true;
           }
-          if (!hasSub) {
-            parsedLevels[parsedLevels.length - 1].kind = 'sub';
+          if (!hasSub && parsedLevels.length > 1) {
+            // HD camera substreams can use more bandwidth than the main stream.
+            let lower = parsedLevels[parsedLevels.length - 1];
+            for (const level of parsedLevels) {
+              if (level.height && lower.height && level.height < lower.height) lower = level;
+            }
+            lower.kind = 'sub';
           }
           if (!hasMain) {
             parsedLevels[0].kind = 'main';

@@ -981,6 +981,7 @@ function deliverFMP4Frame(data: Uint8Array, isKeyframe: boolean, ptsSeconds?: nu
     }
   } else if (config.videoCodec === 'h265' && currentHVCC) {
     msg.description = currentHVCC;
+    if (currentParsedCodec) msg.parsedCodec = currentParsedCodec;
   }
   
   workerCtx.postMessage(msg, [transferableBuffer]);
@@ -1000,6 +1001,26 @@ function deliverFMP4Audio(aac: Uint8Array, ptsSeconds: number) {
     },
     [transferable]
   );
+}
+
+// ISO/IEC 14496-15 serializes profile compatibility flags least-significant bit first
+// in the codec string, and omits trailing zero constraint bytes.
+function hevcCodec(entry: string, record: Uint8Array): string {
+  const profile = record[1];
+  let compatibility = 0;
+  for (let bit = 0; bit < 32; bit++) {
+    if (record[2 + (bit >> 3)] & (0x80 >> (bit & 7))) compatibility += 2 ** bit;
+  }
+  const constraints = Array.from(record.subarray(6, 12));
+  while (constraints.length && constraints[constraints.length - 1] === 0) constraints.pop();
+  const parts = [
+    entry,
+    ['', 'A', 'B', 'C'][profile >> 6] + (profile & 31),
+    compatibility.toString(16).toUpperCase(),
+    ((profile & 32) ? 'H' : 'L') + record[12],
+    ...constraints.map(value => value.toString(16).padStart(2, '0').toUpperCase()),
+  ];
+  return parts.join('.');
 }
 
 function processFMP4Box(type: string, boxData: Uint8Array) {
@@ -1038,8 +1059,12 @@ function processFMP4Box(type: string, boxData: Uint8Array) {
       }
     }
 
+    currentAVCC = null;
+    currentHVCC = null;
+    currentParsedCodec = undefined;
     const avcc = findBox(boxData, 'avcC');
-    if (avcc) {
+    if (avcc && avcc.length >= 5 && avcc[0] === 1) {
+      config.videoCodec = 'h264';
       currentAVCC = new Uint8Array(avcc);
       logWarn(`Extracted avcC: ${currentAVCC.length} bytes`);
       if (currentAVCC.length >= 5) {
@@ -1055,7 +1080,9 @@ function processFMP4Box(type: string, boxData: Uint8Array) {
       }
     }
     const hvcc = findBox(boxData, 'hvcC');
-    if (hvcc) {
+    if (hvcc && hvcc.length >= 23 && hvcc[0] === 1) {
+      config.videoCodec = 'h265';
+      currentParsedCodec = hevcCodec(findBox(boxData, 'hev1') ? 'hev1' : 'hvc1', hvcc);
       currentHVCC = new Uint8Array(hvcc);
       logWarn(`Extracted hvcC: ${currentHVCC.length} bytes`);
       if (currentHVCC.length >= 22) {

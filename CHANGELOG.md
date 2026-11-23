@@ -2,6 +2,10 @@
 
 English · [Русский](./CHANGELOG.ru.md)
 
+## Core 1.1.2 — 2026-11-23
+
+The player detects AVC and HEVC in fragmented MP4 initialization segments and passes the recorded profile and configuration to WebCodecs. For HD camera variants, the lower resolution identifies the substream even when its bitrate is higher.
+
 ## 1.1.1 — 2026-11-22
 
 The core and all three plugins now include complete English and Russian documentation. English is the default.

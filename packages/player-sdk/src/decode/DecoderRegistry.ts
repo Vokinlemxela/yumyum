@@ -429,7 +429,7 @@ export class H264Decoder extends BaseVideoDecoder {
 export class HEVCDecoder extends BaseVideoDecoder {
   private isWasmFallback = false;
   private isReady = false;
-  private packetQueue: Array<{ packet: Uint8Array; timestampUs: number; isKeyframe: boolean }> = [];
+  private packetQueue: Array<{ packet: Uint8Array; timestampUs: number; isKeyframe: boolean; parsedCodec?: string; description?: Uint8Array }> = [];
   public ready: Promise<void>;
 
   /** Resolves the software fallback decoder (e.g. plugin 'h265-sw'), if any. */
@@ -491,7 +491,7 @@ export class HEVCDecoder extends BaseVideoDecoder {
     const queue = this.packetQueue;
     this.packetQueue = [];
     for (const item of queue) {
-      this.decode(item.packet, item.timestampUs, item.isKeyframe);
+      this.decode(item.packet, item.timestampUs, item.isKeyframe, item.parsedCodec, item.description);
     }
   }
 
@@ -569,7 +569,7 @@ export class HEVCDecoder extends BaseVideoDecoder {
 
     if (!this.isReady) {
       if (this.packetQueue.length < 150) {
-        this.packetQueue.push({ packet, timestampUs, isKeyframe });
+        this.packetQueue.push({ packet, timestampUs, isKeyframe, parsedCodec, description });
       }
       return;
     }
@@ -585,14 +585,16 @@ export class HEVCDecoder extends BaseVideoDecoder {
     }
 
     const descriptionChanged = description && (!this.currentDescription || !areUint8ArraysEqual(description, this.currentDescription));
-    if (descriptionChanged) {
-      this.currentDescription = description;
+    const codecChanged = parsedCodec && parsedCodec !== this.currentCodec && !this.failedCodecs.has(parsedCodec);
+    if (descriptionChanged || codecChanged) {
+      if (codecChanged) this.currentCodec = parsedCodec;
+      if (description) this.currentDescription = description;
       this.hasDecodedFirstKeyframe = false;
 
       if (this.decoder && this.decoder.state !== 'closed') {
         try {
           this.configureDecoder();
-          this.logger.debug('Synchronously reconfigured HEVC successfully with description: ' + this.currentDescription.length + ' bytes');
+          this.logger.debug('Reconfigured HEVC for ' + this.currentCodec);
         } catch (err) {
           this.logger.warn('Failed to synchronously reconfigure HEVC decoder:', err);
         }
