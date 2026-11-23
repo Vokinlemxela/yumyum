@@ -75,7 +75,11 @@ export class PlaybackController {
    */
   private buffering = false;
 
-  private lastKeptPts = -1;
+  private nextKeepPts = -1;
+  private previousInputPts: number | undefined;
+  private sourceFrameInterval: number | undefined;
+  private targetFps: number | undefined;
+  private renderFps: number | undefined;
   private decodedFramesCount = 0;
   private renderedFrameTimes: number[] = [];
   private droppedFrameTimes: number[] = [];
@@ -88,19 +92,17 @@ export class PlaybackController {
     private onBackpressureChange: ((pause: boolean) => void) | null,
     private onEnded: (() => void) | null | undefined,
     private onBufferingChange: ((buffering: boolean) => void) | null | undefined,
-    private targetFps: number | undefined,
-    private renderFps: number | undefined,
-    private lowPower: boolean | undefined,
+    private readonly configuredTargetFps: number | undefined,
+    private readonly configuredRenderFps: number | undefined,
+    lowPower: boolean | undefined,
     private logger: Logger,
     private onSignals?: ((signals: StreamSignals) => void) | null,
   ) {
-    if (this.lowPower) {
-      if (this.targetFps === undefined) this.targetFps = 8;
-      if (this.renderFps === undefined) this.renderFps = this.targetFps;
+    this.targetFps = this.configuredTargetFps ?? (lowPower ? 8 : undefined);
+    this.renderFps = this.configuredRenderFps ?? this.targetFps;
+    if (lowPower) {
       this.maxQueueSize = 5;
       this.minQueueSize = 2;
-    } else if (this.targetFps !== undefined) {
-      if (this.renderFps === undefined) this.renderFps = this.targetFps;
     }
     this.masterClock.setAnchor(0, performance.now() / 1000);
     this.startSignalsInterval();
@@ -116,14 +118,14 @@ export class PlaybackController {
   }
 
   public setLowPower(lowPower: boolean): void {
-    this.lowPower = lowPower;
-    if (lowPower) {
-      this.targetFps = 8;
-      this.renderFps = 8;
-      this.maxQueueSize = 5;
-      this.minQueueSize = 2;
-      this.logger.info('PlaybackController: Switched to lowPower mode (FPS target: 8)');
-    }
+    const target = lowPower ? Math.min(8, this.configuredTargetFps ?? 8) : this.configuredTargetFps;
+    if (target !== this.targetFps) this.nextKeepPts = -1;
+    this.targetFps = target;
+    this.renderFps = lowPower ? Math.min(this.targetFps!, this.configuredRenderFps ?? 8)
+      : this.configuredRenderFps ?? this.targetFps;
+    this.maxQueueSize = lowPower ? 5 : 30;
+    this.minQueueSize = lowPower ? 2 : 10;
+    this.checkBackpressure();
   }
 
   /**
@@ -146,12 +148,33 @@ export class PlaybackController {
   public enqueueFrame(frame: DecodedFrame) {
     this.enqueueCount++;
     this.decodedFramesCount++;
+    if (this.duration === Infinity && this.seekTarget !== null && frame.pts < this.seekTarget) {
+      // A late live GOP may need a long preroll to rebuild decoder references.
+      // Release those textures on arrival instead of queuing them for rendering.
+      if (frame.data && 'close' in frame.data) frame.data.close();
+      this.droppedFramesCount++;
+      return;
+    }
+
+    // Use media time: live HLS can deliver a whole segment in a single burst.
+    if (this.previousInputPts !== undefined) {
+      const delta = frame.pts - this.previousInputPts;
+      if (delta >= 1 / 240 && delta <= 1) {
+        this.sourceFrameInterval = this.sourceFrameInterval === undefined
+          ? delta : this.sourceFrameInterval * 0.9 + delta * 0.1;
+      }
+    }
+    this.previousInputPts = frame.pts;
 
     if (this.targetFps !== undefined) {
       // Never decimate a keyframe: it's the GOP leader that later frames in
       // the same group depend on for decode continuity. Keyframes are rare
       // (once per GOP) so always keeping them has negligible FPS impact.
-      const isDecimationCandidate = this.lastKeptPts !== -1 && frame.pts >= this.lastKeptPts && frame.pts - this.lastKeptPts < (1 / this.targetFps) - 0.005;
+      const interval = 1 / this.targetFps;
+      // Retain a fractional deadline so 12 FPS -> 8 FPS delivers eight frames,
+      // instead of rounding every second source frame down to six FPS.
+      const isDecimationCandidate = this.nextKeepPts >= 0 &&
+        frame.pts < this.nextKeepPts - 0.005 && frame.pts >= this.nextKeepPts - interval;
       if (isDecimationCandidate && !frame.isKeyframe) {
         if (frame.data && 'close' in frame.data) {
           try {
@@ -161,10 +184,12 @@ export class PlaybackController {
           }
         }
         this.droppedFramesCount++;
-        this.droppedFrameTimes.push(performance.now());
         return;
       }
-      this.lastKeptPts = Math.max(this.lastKeptPts, frame.pts);
+      if (!isDecimationCandidate) {
+        this.nextKeepPts = this.nextKeepPts < 0 || Math.abs(frame.pts - this.nextKeepPts) >= interval
+          ? frame.pts + interval : this.nextKeepPts + interval;
+      }
     }
     
     // Insert frame in ascending PTS order to support B-frame reordering
@@ -242,7 +267,11 @@ export class PlaybackController {
     }
     this.frameQueue = [];
     this.lastRenderedPTS = -1;
-    this.lastKeptPts = -1;
+    this.nextKeepPts = -1;
+    this.previousInputPts = undefined;
+    this.sourceFrameInterval = undefined;
+    this.droppedFrameTimes.length = 0;
+    this.renderedFrameTimes.length = 0;
     this.audioCtxStartOffset = null;
     this.isBackpressurePaused = false;
     this.isDrawingGap = false;
@@ -253,6 +282,12 @@ export class PlaybackController {
     // clock from scratch (the first valid sample after the flush is adopted).
     this.masterClock.reset();
     this.onBackpressureChange?.(false);
+  }
+
+  public reportSkippedLiveFrames(count: number) {
+    this.droppedFramesCount += count;
+    const now = performance.now();
+    for (let i = 0; i < count; i++) this.droppedFrameTimes.push(now);
   }
 
   public getDiagnostics() {
@@ -457,7 +492,6 @@ export class PlaybackController {
           }
         }
         this.droppedFramesCount++;
-        this.droppedFrameTimes.push(performance.now());
       }
       if (this.frameQueue.length === 0) {
         // Target frame not decoded yet — hold the clock at the target so it
@@ -667,7 +701,11 @@ export class PlaybackController {
         throughputSamples: 0,
         droppedFps: this.droppedFrameTimes.length,
         effectiveFps: this.renderedFrameTimes.length,
-        targetFps: this.targetFps ?? 25,
+        targetFps: Math.min(
+          this.targetFps ?? Infinity, this.renderFps ?? Infinity,
+          typeof document !== 'undefined' && document.hidden ? 10 : Infinity,
+          this.sourceFrameInterval ? 1 / this.sourceFrameInterval : (this.targetFps ?? this.renderFps ?? 25),
+        ),
         avgQueueLen: Math.round(avgQueueLen * 10) / 10,
         // proxy state: decoder is configured and actively producing frames
         decoderReady: this.state === 'PLAYING' && this.lastRenderedPTS !== -1,

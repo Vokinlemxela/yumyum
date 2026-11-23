@@ -1,3 +1,4 @@
+import type { ReceiverNetworkSample } from '../quality/Signals.js';
 import { Logger } from '../utils/Logger.js';
 import { QualitySource } from '../quality/QualitySource.js';
 
@@ -39,6 +40,8 @@ export interface WallClockRange {
  * Dependencies handed to every loader factory. A loader uses only what it needs.
  */
 export interface LoaderDeps {
+  /** Current consumer/renderer ceiling, available before the initial media request. */
+  getMaxQualityKind?(): 'main' | 'sub' | null;
   /**
    * Deliver a raw media buffer to the demuxer.
    * `streaming` selects continuous stream demux (`true`) vs. discrete segment
@@ -51,6 +54,8 @@ export interface LoaderDeps {
    * segments. Live / progressive MP4 / mock paths never call it.
    */
   onSegmentMeta?: (meta: SegmentMeta) => void;
+  /** Marks the boundary before the first bytes of a new live HLS rendition. */
+  onLiveRenditionChange?: () => void;
   /** Locally generated mock elementary packets that bypass the demuxer worker. */
   onMockPacket: ((packet: Uint8Array, type: 'video' | 'audio', pts: number, isKey: boolean) => void) | null;
   onError: ((error: Error) => void) | null;
@@ -82,7 +87,7 @@ export interface IStreamLoader {
    */
   getBufferedEnd?(): number;
   /** Get current throughput estimation (in Kbps) and number of samples */
-  getThroughput?(): { throughputKbps: number; throughputSamples: number };
+  getThroughput?(): { throughputKbps: number; throughputSamples: number; receiverNetwork?: ReceiverNetworkSample };
   /**
    * Whether this loader exposes a wall-clock (PROGRAM-DATE-TIME) timeline.
    * Only archive VOD loaders return `true`; live / progressive / mock omit it.

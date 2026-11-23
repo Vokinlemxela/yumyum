@@ -8,6 +8,8 @@ export type WHEPConnectionState = 'new' | 'connecting' | 'connected' | 'reconnec
 
 /** Options for fine-tuning the WHEP session. */
 export interface WHEPLoaderOptions {
+  /** Confirmed profiles for this source, including the URL passed to load(). */
+  qualityLevels?: readonly QualityLevel[];
   /**
    * @deprecated Reconnections are now unbounded; this option is ignored.
    */
@@ -95,6 +97,8 @@ export class WHEPLoader implements IStreamLoader, QualitySource {
 
   private qualityLevels: QualityLevel[] = [];
   private activeQualityId = 'main';
+  private sessionGeneration = 0;
+  private switching = false;
 
   // ── PeerConnection state ──
   private pc: RTCPeerConnection | null = null;
@@ -110,12 +114,13 @@ export class WHEPLoader implements IStreamLoader, QualitySource {
   private disconnectedTimeout: ReturnType<typeof setTimeout> | null = null;
   private isIntentionallyDisconnected = false;
 
-  private lastBytesReceived = 0;
-  private lastTimestamp = 0;
   private smoothedThroughputKbps = 0;
   private throughputSamplesCount = 0;
-  private alpha = 0.15;
+  private receiverNetwork: { lossRatio?: number; capacityKbps?: number } = {};
+  private lastStatsAt = -Infinity;
   private statsInterval: ReturnType<typeof setInterval> | null = null;
+  private readonly configuredLevels?: readonly QualityLevel[];
+  private readonly getMaxQualityKind: LoaderDeps['getMaxQualityKind'];
 
   // ── Config ──
   private readonly extraHeaders: Record<string, string>;
@@ -131,6 +136,8 @@ export class WHEPLoader implements IStreamLoader, QualitySource {
   private audioSourceNode: MediaStreamAudioSourceNode | null = null;
 
   constructor(deps: LoaderDeps, logger: Logger, options: WHEPLoaderOptions = {}) {
+    this.configuredLevels = options.qualityLevels;
+    this.getMaxQualityKind = deps.getMaxQualityKind;
     this.onMockPacket = deps.onMockPacket;
     this.onError = deps.onError;
     this.logger = logger;
@@ -144,6 +151,7 @@ export class WHEPLoader implements IStreamLoader, QualitySource {
   // ─── IStreamLoader ──────────────────────────────────────────────────
 
   public async load(url: string): Promise<void> {
+    this.sessionGeneration++;
     // 0. Feature detection
     const transformSupport = detectEncodedTransformSupport();
     if (!transformSupport) {
@@ -155,8 +163,11 @@ export class WHEPLoader implements IStreamLoader, QualitySource {
       throw err;
     }
 
-    this.qualityLevels = this.getStreamLevels(url);
-    const activeLevel = this.qualityLevels.find(l => l.id === this.activeQualityId) || this.qualityLevels[0];
+    const initial = this.configuredLevels?.find(level => level.url === url);
+    this.qualityLevels = initial ? [...this.configuredLevels!] : this.getStreamLevels(url);
+    if (this.configuredLevels && !initial) this.qualityLevels = [{ id: 'main', label: 'Main', kind: 'main', url }];
+    const capped = this.getMaxQualityKind?.() === 'sub' && this.qualityLevels.find(level => level.kind === 'sub');
+    const activeLevel = capped || initial || this.qualityLevels.find(l => l.id === this.activeQualityId) || this.qualityLevels[0];
     this.activeQualityId = activeLevel.id;
     this.sourceUrl = activeLevel.url;
     this.isIntentionallyDisconnected = false;
@@ -181,6 +192,7 @@ export class WHEPLoader implements IStreamLoader, QualitySource {
   }
 
   public destroy(): void {
+    this.sessionGeneration++;
     this.disconnect();
     this.onMockPacket = null;
     this.onError = null;
@@ -197,6 +209,7 @@ export class WHEPLoader implements IStreamLoader, QualitySource {
     url: string,
     transformSupport: 'script-transform' | 'encoded-streams',
     isReconnect = false,
+    reportError = true,
   ): Promise<void> {
     this.isIntentionallyDisconnected = false;
     if (isReconnect) {
@@ -309,6 +322,14 @@ export class WHEPLoader implements IStreamLoader, QualitySource {
         throw new Error(`WHEP endpoint returned ${response.status}: ${response.statusText}`);
       }
 
+      const location = response.headers.get('Location');
+      const session = location ? new URL(location, httpUrl).href : null;
+      if (pc !== this.pc) {
+        if (session) void fetch(session, { method: 'DELETE', headers: this.extraHeaders }).catch(() => {});
+        throw new Error('WHEP session replaced');
+      }
+      this.sessionUrl = session;
+
       // 8. Parse SDP answer
       const sdpAnswer = await response.text();
       await pc.setRemoteDescription(new RTCSessionDescription({
@@ -316,25 +337,25 @@ export class WHEPLoader implements IStreamLoader, QualitySource {
         sdp: sdpAnswer,
       }));
 
-      // 9. Save session URL for teardown (DELETE)
-      const location = response.headers.get('Location');
-      if (location) {
-        // Location may be relative — resolve against the request URL
-        this.sessionUrl = new URL(location, httpUrl).href;
-      }
-
+      if (pc !== this.pc) throw new Error('WHEP session replaced');
       this.connectionState = 'connected';
       this.reconnectAttempts = 0;
       this.logger.info(`WHEP session established. Session: ${this.sessionUrl ?? '(no Location header)'}`);
       this.startStatsPolling();
     } catch (err) {
       clearTimeout(timeout);
+      if (pc !== this.pc) throw err;
+      if (this.sessionUrl) {
+        const session = this.sessionUrl;
+        this.sessionUrl = null;
+        void fetch(session, { method: 'DELETE', headers: this.extraHeaders }).catch(() => {});
+      }
       this.closePeerConnection(isReconnect);
 
       if (err instanceof DOMException && err.name === 'AbortError') {
         const timeoutErr = new Error(`WHEP connection timeout after ${this.connectTimeoutMs}ms`);
         if (!isReconnect) {
-          this.onError?.(timeoutErr);
+          if (reportError) this.onError?.(timeoutErr);
           throw timeoutErr;
         }
         this.logger.warn(timeoutErr.message);
@@ -343,7 +364,7 @@ export class WHEPLoader implements IStreamLoader, QualitySource {
       }
 
       if (!isReconnect) {
-        this.onError?.(err instanceof Error ? err : new Error(String(err)));
+        if (reportError) this.onError?.(err instanceof Error ? err : new Error(String(err)));
         throw err;
       }
       this.logger.warn(`Reconnect failed: ${err}`);
@@ -597,6 +618,11 @@ export class WHEPLoader implements IStreamLoader, QualitySource {
       this.statsInterval = null;
     }
 
+    this.receiverNetwork = {};
+    this.lastStatsAt = -Infinity;
+    this.smoothedThroughputKbps = 0;
+    this.throughputSamplesCount = 0;
+
     // Tear down native audio
     if (this.audioSourceNode) {
       try {
@@ -650,51 +676,59 @@ export class WHEPLoader implements IStreamLoader, QualitySource {
     this.closePeerConnection();
   }
 
-  public getThroughput(): { throughputKbps: number; throughputSamples: number } {
+  public getThroughput() {
     return {
       throughputKbps: Math.round(this.smoothedThroughputKbps),
       throughputSamples: this.throughputSamplesCount,
+      // A paced stream's payload bitrate is never a capacity estimate. Only
+      // enable network switches for profiles the application actually supplied.
+      receiverNetwork: this.configuredLevels && performance.now() - this.lastStatsAt <= 2500
+        ? this.receiverNetwork : {},
     };
   }
 
   private startStatsPolling() {
-    if (this.statsInterval) {
-      clearInterval(this.statsInterval);
-    }
-    this.lastBytesReceived = 0;
-    this.lastTimestamp = 0;
-
+    if (this.statsInterval) clearInterval(this.statsInterval);
+    const pc = this.pc;
+    if (!pc) return;
+    let previous: { key: string; bytes: number; time: number; received: number; lost: number } | undefined;
+    let pending = false;
     this.statsInterval = setInterval(async () => {
-      if (!this.pc || this.pc.signalingState === 'closed') return;
+      if (pending || pc !== this.pc || pc.signalingState === 'closed') return;
+      pending = true;
       try {
-        const stats = await this.pc.getStats();
-        let currentBytes = 0;
-        let currentTimestamp = performance.now();
-        
-        stats.forEach((report) => {
-          if (report.type === 'inbound-rtp' && (report.kind === 'video' || report.mediaType === 'video')) {
-            currentBytes = report.bytesReceived || 0;
-          }
+        const stats = await pc.getStats();
+        if (pc !== this.pc) return;
+        let video: RTCInboundRtpStreamStats | undefined;
+        let pairId: string | undefined;
+        stats.forEach(report => {
+          if (report.type === 'inbound-rtp' && (report.kind === 'video' || report.mediaType === 'video')) video = report;
         });
-
-        if (this.lastTimestamp > 0 && currentBytes >= this.lastBytesReceived) {
-          const bytesDiff = currentBytes - this.lastBytesReceived;
-          const timeDiffMs = currentTimestamp - this.lastTimestamp;
-          if (timeDiffMs > 0) {
-            const sampleKbps = (bytesDiff * 8) / timeDiffMs;
-            if (this.smoothedThroughputKbps === 0) {
-              this.smoothedThroughputKbps = sampleKbps;
-            } else {
-              this.smoothedThroughputKbps = this.alpha * sampleKbps + (1 - this.alpha) * this.smoothedThroughputKbps;
-            }
-            this.throughputSamplesCount++;
+        if (!video) return;
+        if (video.transportId) pairId = stats.get(video.transportId)?.selectedCandidatePairId;
+        const incoming = pairId ? stats.get(pairId)?.availableIncomingBitrate : undefined;
+        const now = performance.now();
+        const sample = { key: video.id, bytes: video.bytesReceived ?? 0,
+          time: video.timestamp ?? now, received: video.packetsReceived ?? NaN, lost: video.packetsLost ?? NaN };
+        this.receiverNetwork = {};
+        if (previous && sample.key === previous.key && sample.bytes >= previous.bytes && sample.time > previous.time) {
+          const dt = sample.time - previous.time;
+          const rate = (sample.bytes - previous.bytes) * 8 / dt;
+          this.smoothedThroughputKbps = this.throughputSamplesCount ? 0.15 * rate + 0.85 * this.smoothedThroughputKbps : rate;
+          this.throughputSamplesCount++;
+          const received = sample.received - previous.received;
+          const lost = sample.lost - previous.lost;
+          if (dt <= 2500 && received >= 0 && lost >= 0 && received + lost > 0) {
+            this.receiverNetwork = { lossRatio: lost / (received + lost),
+              capacityKbps: Number.isFinite(incoming) && incoming > 0 ? incoming / 1000 : undefined };
+            this.lastStatsAt = now;
           }
         }
-        
-        this.lastBytesReceived = currentBytes;
-        this.lastTimestamp = currentTimestamp;
+        previous = sample;
       } catch (e) {
         this.logger.warn('Failed to fetch RTC stats:', e);
+      } finally {
+        pending = false;
       }
     }, 1000);
   }
@@ -713,15 +747,26 @@ export class WHEPLoader implements IStreamLoader, QualitySource {
     if (!level) return;
     if (this.activeQualityId === id) return;
 
-    this.logger.info(`WHEPLoader switching quality to: ${id} (${level.url})`);
-    this.activeQualityId = id;
-    this.sourceUrl = level.url;
-
+    if (this.switching) throw new Error('A WHEP profile switch is already in progress');
+    const support = detectEncodedTransformSupport();
+    if (!support) throw new Error('WHEP encoded transform support unavailable');
+    const generation = this.sessionGeneration;
+    const previousUrl = this.sourceUrl;
+    this.switching = true;
     this.disconnect();
-    
-    const transformSupport = detectEncodedTransformSupport();
-    if (transformSupport) {
-      await this.connect(level.url, transformSupport);
+    try {
+      await this.connect(level.url, support, false, false);
+      if (generation !== this.sessionGeneration) throw new Error('WHEP session replaced');
+      this.activeQualityId = id;
+      this.sourceUrl = level.url;
+    } catch (error) {
+      if (generation === this.sessionGeneration) {
+        // Keep the previous selection usable if the target rejects the handshake.
+        await this.connect(previousUrl, support);
+      }
+      throw error;
+    } finally {
+      this.switching = false;
     }
   }
 

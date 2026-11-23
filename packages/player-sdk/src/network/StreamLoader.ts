@@ -73,20 +73,14 @@ export class StreamLoader implements IStreamLoader, QualitySource {
   private loopTimeoutId: ReturnType<typeof setTimeout> | null = null;
   private loopGeneration = 0;
 
-  private smoothedThroughputKbps = 0;
+  private throughputKbps = 0;
+  private readonly transfers: { bytes: number; durationMs: number }[] = [];
+  private lastTransferAt = -Infinity;
+  private readonly throughputMaxAgeMs = 15_000;
   private throughputSamplesCount = 0;
-  private alpha = 0.15;
 
-  /**
-   * Re-entrancy guard for {@link switchQuality}. Without it, an auto-ABR switch
-   * racing a manual switch can interleave mutations of `activeQualityId` /
-   * `playlistUrl` and both call `loadPlaylist` (which resets `segments` /
-   * `fetchIndex` / etc.) on the same instance state, corrupting the playlist.
-   * A concurrent call while one is already in flight is dropped — auto-ABR is
-   * cooldown-gated so losing one cycle is fine, and manual switches retry via
-   * user action.
-   */
-  private isSwitching = false;
+  /** Loads the candidate manifest and init without interrupting the current feed. */
+  private pendingRendition: StreamLoader | null = null;
 
   private getAbortSignal(): AbortSignal {
     if (!this.activeAbortController) {
@@ -96,6 +90,10 @@ export class StreamLoader implements IStreamLoader, QualitySource {
   }
 
   private abortActiveRequests() {
+    if (this.pendingRendition) {
+      this.pendingRendition.stop();
+      this.pendingRendition = null;
+    }
     if (this.activeAbortController) {
       this.activeAbortController.abort();
       this.activeAbortController = null;
@@ -103,13 +101,18 @@ export class StreamLoader implements IStreamLoader, QualitySource {
   }
 
   private onSegmentLoaded: ((segmentData: ArrayBuffer) => void) | null;
+  private onLiveRenditionChange?: () => void;
   private onSegmentMeta: ((meta: SegmentMeta) => void) | null;
   private onMockPacket: ((packet: Uint8Array, type: 'video' | 'audio', pts: number, isKey: boolean) => void) | null;
   private onError: ((error: Error) => void) | null;
   private logger: Logger;
 
-  constructor(deps: LoaderDeps) {
+  private readonly getMaxQualityKind: LoaderDeps['getMaxQualityKind'];
+
+  constructor(private readonly deps: LoaderDeps) {
+    this.getMaxQualityKind = deps.getMaxQualityKind;
     this.onSegmentLoaded = (buffer) => deps.onData(buffer, this.isMp4);
+    this.onLiveRenditionChange = deps.onLiveRenditionChange;
     this.onSegmentMeta = deps.onSegmentMeta ?? null;
     this.onMockPacket = deps.onMockPacket;
     this.onError = deps.onError;
@@ -219,21 +222,28 @@ export class StreamLoader implements IStreamLoader, QualitySource {
     this.stopDownloading();
   }
 
-  public async loadPlaylist(url: string): Promise<void> {
-    this.segments = [];
-    this.segmentUrls.clear();
+  private resetPlaylist(url: string, prepared?: StreamLoader) {
+    this.segments = prepared?.segments ?? [];
+    this.segmentUrls = prepared?.segmentUrls ?? new Set();
     this.markSegmentsDirty();
-    this.hasPDT = false;
-    this.currentSegmentIndex = 0;
+    this.hasPDT = prepared?.hasPDT ?? false;
+    this.currentSegmentIndex = prepared?.currentSegmentIndex ?? 0;
     this.fetchIndex = 0;
     this.pendingRaw = [];
     this.consecutiveFailures = 0;
-    this.playlistUrl = url;
-    this.isMp4 = false;
-    this.isArchive = false;
-    this.initSegmentUrl = '';
-    this.initSegmentBuffer = null;
-    this.needSendInit = false;
+    this.playlistUrl = prepared?.playlistUrl ?? url;
+    this.isMp4 = prepared?.isMp4 ?? false;
+    this.isArchive = prepared?.isArchive ?? false;
+    this.isLive = prepared?.isLive ?? false;
+    this.targetDuration = prepared?.targetDuration ?? 5;
+    this.mp4Duration = prepared?.mp4Duration ?? 0;
+    this.initSegmentUrl = prepared?.initSegmentUrl ?? '';
+    this.initSegmentBuffer = prepared?.initSegmentBuffer ?? null;
+    this.needSendInit = prepared?.needSendInit ?? false;
+  }
+
+  public async loadPlaylist(url: string): Promise<void> {
+    this.resetPlaylist(url);
 
     // Support progressive MP4/fMP4 streams
     if (url.endsWith('.mp4') || url.includes('.mp4') || url.includes('/export') || url.includes('format=mp4')) {
@@ -283,7 +293,8 @@ export class StreamLoader implements IStreamLoader, QualitySource {
             let height: number | undefined;
             let codecs: string | undefined;
             
-            const bandwidthMatch = /BANDWIDTH=(\d+)/.exec(attrStr);
+            const fps = Number(/(?:^|[:,])FRAME-RATE=([\d.]+)/.exec(attrStr)?.[1]);
+            const bandwidthMatch = /(?:^|[:,])BANDWIDTH=(\d+)/.exec(attrStr);
             if (bandwidthMatch) {
               bandwidth = parseInt(bandwidthMatch[1], 10);
             }
@@ -323,6 +334,7 @@ export class StreamLoader implements IStreamLoader, QualitySource {
                   kind: height ? (height <= 480 ? 'sub' : 'main') : 'main',
                   width,
                   height,
+                  fps: fps > 0 && Number.isFinite(fps) ? fps : undefined,
                   bitrateKbps: bandwidth ? Math.round(bandwidth / 1000) : undefined,
                   codecs
                 });
@@ -361,7 +373,9 @@ export class StreamLoader implements IStreamLoader, QualitySource {
           this.qualityLevels = parsedLevels;
           
           if (!this.activeQualityId || !this.qualityLevels.some(l => l.id === this.activeQualityId)) {
-            this.activeQualityId = firstVariantId;
+            const preferred = this.getMaxQualityKind?.() === 'sub'
+              ? this.qualityLevels.find(level => level.kind === 'sub') : undefined;
+            this.activeQualityId = preferred?.id ?? firstVariantId;
           }
           
           const activeLevel = this.qualityLevels.find(l => l.id === this.activeQualityId)!;
@@ -467,9 +481,9 @@ export class StreamLoader implements IStreamLoader, QualitySource {
       // Fresh segments array — invalidate the prefix-sum cache.
       this.markSegmentsDirty();
 
-      // If it is a live stream, seek to the active edge (second to last segment) on first load
+      // Start near the live edge as soon as a complete segment is available.
       if (this.isLive && this.segments.length > 0) {
-        this.currentSegmentIndex = Math.max(0, this.segments.length - 2);
+        this.currentSegmentIndex = this.liveStartIndex();
         this.logger.debug(`Live stream detected. Starting playback from active edge segment index: ${this.currentSegmentIndex}`);
       }
     } else {
@@ -539,6 +553,13 @@ export class StreamLoader implements IStreamLoader, QualitySource {
       url: `${url}/segment_${i}.ts`,
       duration: 2.0,
     }));
+  }
+
+  private liveStartIndex(): number {
+    // A long complete segment already supplies several seconds of decode runway.
+    // Short segments keep one extra segment of startup margin for slow publication.
+    const last = this.segments.length - 1;
+    return Math.max(0, last - ((this.segments[last]?.duration ?? 0) >= 4 ? 0 : 1));
   }
 
   private async refreshPlaylist(): Promise<void> {
@@ -659,9 +680,6 @@ export class StreamLoader implements IStreamLoader, QualitySource {
         let isValid = false;
         if (res.ok) {
           buffer = await res.arrayBuffer();
-          const endTime = performance.now();
-          this.recordThroughputSample(buffer.byteLength, endTime - startTime);
-          
           const uint8 = new Uint8Array(buffer);
           if (this.isValidSegment(uint8)) {
             isValid = true;
@@ -672,6 +690,7 @@ export class StreamLoader implements IStreamLoader, QualitySource {
         if (this.loopGeneration !== gen) return; // seek/stop happened while reading body
 
         if (isValid && buffer) {
+          this.recordSegmentTransfer(segment.url, buffer.byteLength, startTime);
           this.pendingRaw.push({ index: this.fetchIndex, buffer, duration: segment.duration });
           this.fetchIndex++;
           this.consecutiveFailures = 0;
@@ -721,6 +740,7 @@ export class StreamLoader implements IStreamLoader, QualitySource {
     isBackpressurePaused: () => boolean,
     scheduleNext: (delay: number) => void,
   ): Promise<void> {
+    const gen = this.loopGeneration;
     if (isBackpressurePaused()) {
       // Yield execution and check again shortly
       scheduleNext(100);
@@ -731,7 +751,7 @@ export class StreamLoader implements IStreamLoader, QualitySource {
       const maxBehind = 3;
       const liveEdgeIndex = Math.max(0, this.segments.length - 1);
       if (liveEdgeIndex - this.currentSegmentIndex > maxBehind) {
-        const safeTargetIndex = Math.max(0, this.segments.length - 2);
+        const safeTargetIndex = this.liveStartIndex();
         this.logger.warn(`Live streaming lag detected (currently at ${this.currentSegmentIndex}, latest is ${this.segments.length - 1}). Fast-forwarding to safe buffer index: ${safeTargetIndex}`);
         this.currentSegmentIndex = safeTargetIndex;
       }
@@ -778,9 +798,6 @@ export class StreamLoader implements IStreamLoader, QualitySource {
 
         if (res.ok) {
           buffer = await res.arrayBuffer();
-          const endTime = performance.now();
-          this.recordThroughputSample(buffer.byteLength, endTime - startTime);
-          
           const uint8 = new Uint8Array(buffer);
           if (this.isValidSegment(uint8)) {
             isValid = true;
@@ -789,7 +806,9 @@ export class StreamLoader implements IStreamLoader, QualitySource {
           }
         }
 
+        if (gen !== this.loopGeneration) return;
         if (isValid && buffer) {
+          this.recordSegmentTransfer(activeSegment.url, buffer.byteLength, startTime);
           if (this.needSendInit && this.initSegmentBuffer) {
             this.logger.debug('Sending HLS fMP4 init segment');
             this.onSegmentLoaded?.(this.initSegmentBuffer.slice(0));
@@ -847,7 +866,7 @@ export class StreamLoader implements IStreamLoader, QualitySource {
               await this.refreshPlaylist();
               // Jump to the latest available segment (safe buffer edge)
               if (this.segments.length > 0) {
-                this.currentSegmentIndex = Math.max(0, this.segments.length - 2);
+                this.currentSegmentIndex = this.liveStartIndex();
                 this.logger.debug(`Resynced to safe buffer edge at segment index: ${this.currentSegmentIndex}`);
               }
               this.consecutiveFailures = 0;
@@ -1098,19 +1117,43 @@ export class StreamLoader implements IStreamLoader, QualitySource {
 
   public getThroughput(): { throughputKbps: number; throughputSamples: number } {
     return {
-      throughputKbps: Math.round(this.smoothedThroughputKbps),
+      throughputKbps: performance.now() - this.lastTransferAt <= this.throughputMaxAgeMs ? this.throughputKbps : 0,
       throughputSamples: this.throughputSamplesCount,
     };
   }
 
+  private recordSegmentTransfer(url: string, bytes: number, start: number): void {
+    const durationMs = performance.now() - start;
+    const entries = performance.getEntriesByName?.(url, 'resource') ?? [];
+    const timing = entries[entries.length - 1] as PerformanceResourceTiming | undefined;
+    // A previous request to this URL may have been served differently.
+    if (timing && timing.startTime >= start - 1 && (
+      ('deliveryType' in timing && timing.deliveryType === 'cache') || timing.responseStatus === 304 ||
+      (timing.transferSize === 0 && (timing.encodedBodySize > 0 || timing.decodedBodySize > 0))
+    )) return;
+    this.recordThroughputSample(bytes, durationMs);
+  }
+
   private recordThroughputSample(bytes: number, durationMs: number): void {
-    if (durationMs <= 0) durationMs = 1;
-    const sampleKbps = (bytes * 8) / durationMs;
-    if (this.smoothedThroughputKbps === 0) {
-      this.smoothedThroughputKbps = sampleKbps;
-    } else {
-      this.smoothedThroughputKbps = this.alpha * sampleKbps + (1 - this.alpha) * this.smoothedThroughputKbps;
+    if (bytes <= 0 || durationMs <= 0 || !Number.isFinite(durationMs)) return;
+    const now = performance.now();
+    if (now - this.lastTransferAt > this.throughputMaxAgeMs) this.transfers.length = 0;
+    this.lastTransferAt = now;
+    this.transfers.push({ bytes, durationMs });
+    if (this.transfers.length > 4) this.transfers.shift();
+
+    // One cache-like fast fetch or a single slow request should not change
+    // a settled estimate. Combine the retained bytes and actual download time
+    // so a high instantaneous rate does not dominate a long, slow transfer.
+    const byRate = [...this.transfers].sort((a, b) => a.bytes / a.durationMs - b.bytes / b.durationMs);
+    const middle = byRate.length >= 3 ? byRate.slice(1, -1) : byRate;
+    let downloaded = 0;
+    let elapsed = 0;
+    for (const transfer of middle) {
+      downloaded += transfer.bytes;
+      elapsed += transfer.durationMs;
     }
+    this.throughputKbps = Math.round(downloaded * 8 / elapsed);
     this.throughputSamplesCount++;
   }
 
@@ -1133,42 +1176,36 @@ export class StreamLoader implements IStreamLoader, QualitySource {
       return; // Already active
     }
 
-    // Re-entrancy guard: drop a concurrent switch rather than let two overlapping
-    // calls interleave mutations of activeQualityId/playlistUrl and both reset
-    // segment state via loadPlaylist. See `isSwitching` doc comment.
-    if (this.isSwitching) {
-      this.logger.debug(`Dropping concurrent switchQuality(${id}) — a switch is already in flight`);
-      return;
-    }
-    this.isSwitching = true;
+    if (this.pendingRendition) return;
 
+    const candidate = new StreamLoader(this.deps);
+    this.pendingRendition = candidate;
     try {
-      this.logger.info(`Switching quality to: ${level.label} (${level.url})`);
+      await candidate.loadPlaylist(level.url);
+      if (this.pendingRendition !== candidate) {
+        throw new DOMException('Rendition switch canceled', 'AbortError');
+      }
+      if (!candidate.segments.length) throw new Error('Rendition has no playable segments');
 
-      // Save current playback position
-      const currentTime = this.isLive ? 0 : this.getCurrentTimeEstimate();
-
-      this.activeQualityId = id;
-      this.playlistUrl = level.url;
-
-      // Stop the current downloads & clear queue
+      // Commit only after the new playlist and its init are ready. A failed
+      // request therefore leaves the old session, decoder and downloads alive.
+      this.pendingRendition = null;
       const wasDownloading = this.isDownloading;
+      const currentTime = this.isLive ? 0 : this.getCurrentTimeEstimate();
       this.stopDownloading();
-
-      // Reload the playlist
-      await this.loadPlaylist(level.url);
-
-      // Restore position if VOD
-      if (!this.isLive) {
+      this.resetPlaylist(level.url, candidate);
+      this.activeQualityId = id;
+      if (this.isLive) {
+        this.onLiveRenditionChange?.();
+      } else {
         this.seek(currentTime);
       }
-
-      // Resume downloading if it was active
       if (wasDownloading && this.isBackpressurePausedFn) {
         this.startDownloading(this.isBackpressurePausedFn);
       }
     } finally {
-      this.isSwitching = false;
+      if (this.pendingRendition === candidate) this.pendingRendition = null;
+      candidate.stop();
     }
   }
 

@@ -53,6 +53,7 @@ export class WebGLVideoRenderer {
   private isOverflow = false;
   private currentRenderMode: 'webgl' | '2d-fallback' | '2d-overflow' | 'js-fallback' | 'js-fallback-dropped' = 'webgl';
 
+  public onRecovered?: () => void;
   public onFallback?: (reason: 'overflow' | 'lost' | 'unavailable') => void;
 
   // Cached locations to prevent dynamically querying them on the hot path
@@ -101,6 +102,7 @@ export class WebGLVideoRenderer {
       this.isFallbackMode = false;
       this.isOverflow = false;
       this.currentRenderMode = 'webgl';
+      this.onRecovered?.();
       this.gl = null;
       this.yuvProgram = null;
       this.rgbaProgram = null;

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { QualityController } from '../quality/QualityController.js';
 import { StreamLoader } from './StreamLoader.js';
 import { LoaderDeps, SegmentMeta } from './IStreamLoader.js';
 import { Logger } from '../utils/Logger.js';
@@ -67,6 +68,39 @@ function makeLoader(onData: (buf: ArrayBuffer) => void) {
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────
+
+describe('live edge start', () => {
+  it.each([[10, 2], [2, 1]])('starts %is segments at the expected edge and follows a newly published segment', async (duration, first) => {
+    const segments: number[] = [];
+    let count = 3;
+    const url = 'https://example.com/live/index.m3u8';
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      if (input === url) {
+        const lines = Array.from({ length: count }, (_, i) => `#EXTINF:${duration},\n${i}.ts`);
+        return new Response(['#EXTM3U', '#EXT-X-TARGETDURATION:' + duration, ...lines].join('\n'));
+      }
+      segments.push(Number(/(\d+)\.ts$/.exec(String(input))![1]));
+      return new Response(makeTsSegment());
+    });
+    vi.useFakeTimers();
+    const loader = makeLoader(() => {});
+    try {
+      await loader.load(url);
+      loader.start(() => false);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(segments[0]).toBe(first);
+      expect(segments).not.toContain(3);
+      count++;
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(segments.at(-1)).toBe(3);
+      expect(new Set(segments).size).toBe(segments.length);
+    } finally {
+      loader.destroy();
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
+  });
+});
 
 describe('StreamLoader VOD raw look-ahead buffer', () => {
   let tracker: FetchTracker;
@@ -866,9 +900,8 @@ high/stream.m3u8
     // The "low" playlist must never have been fetched: the concurrent call was
     // dropped before it could mutate any shared state.
     expect(fetches).not.toContain('https://example.com/low/stream.m3u8');
-    // activeQualityId must not have been clobbered by the dropped call while the
-    // first switch was still in flight.
-    expect(loader.getActiveId()).toBe('https://example.com/high/stream.m3u8');
+    // Until the new manifest is ready, keep reporting the playing rendition.
+    expect(loader.getActiveId()).toBe('https://example.com/sub/stream.m3u8');
 
     // Now let the first (in-flight) switch complete.
     releaseHigh();
@@ -882,12 +915,56 @@ high/stream.m3u8
       'https://example.com/high/high_0.ts',
       'https://example.com/high/high_1.ts',
     ]);
-    expect((loader as any).isSwitching).toBe(false);
+    expect((loader as any).pendingRendition).toBeNull();
 
     loader.destroy();
   });
 
-  it('clears the isSwitching guard even if loadPlaylist rejects, so a later switch can proceed', async () => {
+  it.each(['manifest', 'init'])('continues live media after a failed %s and switches when it recovers', async (failure) => {
+    const root = 'https://example.com/';
+    const master = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000\nmain/index.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=200000\nsub/index.m3u8';
+    const output: string[] = [];
+    let available = false;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input);
+      if (url === root + 'index.m3u8') return new Response(master);
+      const sub = url.includes('/sub/');
+      if (sub && !available && url.endsWith(failure === 'manifest' ? 'index.m3u8' : 'init.mp4')) {
+        return new Response(null, { status: 503 });
+      }
+      if (url.endsWith('index.m3u8')) {
+        const init = sub ? '#EXT-X-MAP:URI="init.mp4"\n' : '';
+        return new Response(makePlaylist(true).replace('#EXTM3U\n', '#EXTM3U\n' + init));
+      }
+      const bytes = new Uint8Array(makeTsSegment());
+      bytes[1] = sub ? 2 : 1;
+      return new Response(bytes);
+    });
+    const loader = new StreamLoader({
+      onData: bytes => output.push(new Uint8Array(bytes)[1] === 1 ? 'main' : 'sub'),
+      onLiveRenditionChange: () => output.push('boundary'),
+      onMockPacket: null, onError: null, logger: new Logger('test', 'silent'),
+    });
+    try {
+      await loader.load(root + 'index.m3u8');
+      loader.start(() => false);
+      await waitFor(() => output.length === 1);
+      await expect(loader.switchQuality(root + 'sub/index.m3u8')).rejects.toThrow();
+      expect(loader.getActiveId()).toBe(root + 'main/index.m3u8');
+      await waitFor(() => output.length > 1);
+      expect(output).toEqual(['main', 'main']);
+      available = true;
+      await loader.switchQuality(root + 'sub/index.m3u8');
+      expect(loader.getActiveId()).toBe(root + 'sub/index.m3u8');
+      await waitFor(() => output.includes('sub'));
+      expect(output.slice(0, 4)).toEqual(['main', 'main', 'boundary', 'sub']);
+    } finally {
+      loader.destroy();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('keeps the previous rendition on HTTP failure and permits another attempt', async () => {
     const fetches: string[] = [];
     const masterPlaylist = `
 #EXTM3U
@@ -924,13 +1001,13 @@ low_0.ts
 
     await expect(loader.quality!.switchQuality('https://example.com/high/stream.m3u8')).rejects.toThrow();
 
-    // The guard must clear in the `finally` branch even though loadPlaylist threw.
-    expect((loader as any).isSwitching).toBe(false);
+    expect(loader.getActiveId()).toBe('https://example.com/low/stream.m3u8');
+    expect((loader as any).pendingRendition).toBeNull();
 
     // A subsequent switch must not be dropped by a stuck guard.
     fetches.length = 0;
-    await loader.quality!.switchQuality('https://example.com/low/stream.m3u8');
-    expect(fetches).toContain('https://example.com/low/stream.m3u8');
+    await expect(loader.quality!.switchQuality('https://example.com/high/stream.m3u8')).rejects.toThrow();
+    expect(fetches).toContain('https://example.com/high/stream.m3u8');
 
     loader.destroy();
     vi.restoreAllMocks();
@@ -1129,58 +1206,139 @@ seg_0.m4s
   });
 });
 
-describe('StreamLoader EWMA throughput', () => {
-  it('initializes throughput with the first sample', () => {
+describe('HLS segment throughput', () => {
+  const record = (loader: StreamLoader, rate: number, bytes = 300_000) => {
+    const duration = bytes * 8 / rate;
+    loader['recordThroughputSample'](bytes, duration);
+    return loader.getThroughput().throughputKbps;
+  };
+
+  it('tracks a step from 600 Mbps to 814 kbps and back using completed transfers', () => {
     const loader = makeLoader(() => {});
-    // Access private method via cast
-    const sl = loader as any;
-    expect(sl.getThroughput().throughputKbps).toBe(0);
-    expect(sl.getThroughput().throughputSamples).toBe(0);
-
-    // 1MB in 100ms → (1_000_000 * 8) / 100 = 80000 Kbps
-    sl.recordThroughputSample(1_000_000, 100);
-    const tp = sl.getThroughput();
-    expect(tp.throughputSamples).toBe(1);
-    expect(tp.throughputKbps).toBeGreaterThan(70000);
-
+    expect(loader.getThroughput()).toEqual({ throughputKbps: 0, throughputSamples: 0 });
+    for (let i = 0; i < 4; i++) record(loader, 600_000);
+    const down = Array.from({length: 4}, () => record(loader, 814));
+    expect(down[0]).toBe(600_000);
+    expect(down[1]).toBeLessThan(1700);
+    expect(down[2]).toBe(814);
+    const up = Array.from({length: 4}, () => record(loader, 600_000));
+    expect(up[0]).toBe(814);
+    expect(up[2]).toBe(600_000);
+    expect(loader.getThroughput().throughputSamples).toBe(12);
     loader.destroy();
   });
 
-  it('applies EWMA smoothing on subsequent samples', () => {
+  it('weights the retained transfers by their bytes and elapsed download time', () => {
     const loader = makeLoader(() => {});
-    const sl = loader as any;
-
-    // First sample: 100KB in 100ms → (100000 * 8) / 100 = 8000 Kbps
-    sl.recordThroughputSample(100000, 100);
-    const first = sl.smoothedThroughputKbps;
-
-    // Second sample: much lower: 10KB in 100ms → ≈ 781.25 Kbps
-    sl.recordThroughputSample(10000, 100);
-    const second = sl.smoothedThroughputKbps;
-
-    // EWMA should dampen the drop — second should be between first and 781
-    expect(second).toBeLessThan(first);
-    expect(second).toBeGreaterThan(781);
-
-    // Third sample: same low value → should decrease further
-    sl.recordThroughputSample(10000, 100);
-    const third = sl.smoothedThroughputKbps;
-    expect(third).toBeLessThan(second);
-
-    expect(sl.getThroughput().throughputSamples).toBe(3);
+    record(loader, 100);
+    record(loader, 1000, 10_000);
+    record(loader, 3000, 300_000);
+    record(loader, 600_000);
+    expect(loader.getThroughput().throughputKbps).toBe(Math.round(310_000 * 8 / (80 + 800)));
     loader.destroy();
   });
 
-  it('clamps zero-duration to 1ms minimum', () => {
+  it('excludes confirmed cache hits and expires the estimate when fresh network measurements stop', () => {
+    vi.useFakeTimers();
     const loader = makeLoader(() => {});
-    const sl = loader as any;
+    const url = 'https://camera.test/seg.ts';
+    const entries = vi.spyOn(performance, 'getEntriesByName');
+    try {
+      vi.advanceTimersByTime(1000);
+      record(loader, 814);
+      for (let i = 0; i < 4; i++) {
+        const start = performance.now();
+        vi.advanceTimersByTime(1);
+        entries.mockReturnValue([{ name: url, startTime: start, transferSize: 0, encodedBodySize: 100000 }] as PerformanceResourceTiming[]);
+        loader['recordSegmentTransfer'](url, 100000, start);
+      }
+      expect(loader.getThroughput()).toEqual({ throughputKbps: 814, throughputSamples: 1 });
+      vi.advanceTimersByTime(16_000);
+      expect(loader.getThroughput().throughputKbps).toBe(0);
+      // Cache information for an earlier request to the same URL must not
+      // suppress a newly completed download without a timing entry yet.
+      loader['recordSegmentTransfer'](url, 25000, performance.now() - 100);
+      expect(loader.getThroughput()).toEqual({ throughputKbps: 2000, throughputSamples: 2 });
+    } finally {
+      entries.mockRestore();
+      loader.destroy();
+      vi.useRealTimers();
+    }
+  });
 
-    // Zero duration should not throw or produce Infinity
-    sl.recordThroughputSample(1000, 0);
-    const tp = sl.getThroughput();
-    expect(Number.isFinite(tp.throughputKbps)).toBe(true);
-    expect(tp.throughputKbps).toBeGreaterThan(0);
+  it('downgrades on bandwidth while playback stays at 25 FPS without frame drops', () => {
+    vi.useFakeTimers();
+    const loader = makeLoader(() => {});
+    const levels = [
+      { id: 'main', kind: 'main', label: 'HD', url: 'main', bitrateKbps: 2100 },
+      { id: 'sub', kind: 'sub', label: 'SD', url: 'sub', bitrateKbps: 400 },
+    ];
+    let active = 'main';
+    const quality = new QualityController({
+      getLevels: () => levels, getActiveId: () => active, switchQuality: id => { active = id; },
+    }, new Logger('test'), { mode: 'auto' });
+    const changes = vi.fn();
+    quality.onQualitySwitch = changes;
+    const signal = () => quality.reportSignals({ ...loader.getThroughput(), targetFps: 25, effectiveFps: 25,
+      droppedFps: 0, decoderReady: true, avgQueueLen: 2, ts: performance.now() }, true);
+    try {
+      for (let i = 0; i < 4; i++) record(loader, 600_000);
+      for (let i = 0; i < 4; i++) {
+        vi.advanceTimersByTime(2000);
+        record(loader, 814, 203_500);
+        signal();
+      }
+      expect(changes).toHaveBeenCalledExactlyOnceWith('sub', expect.stringContaining('Insufficient bandwidth'));
+      for (let i = 0; i < 20; i++) {
+        vi.advanceTimersByTime(2000);
+        record(loader, 814, 203_500);
+        signal();
+        expect(active).toBe('sub');
+      }
+      expect(changes).toHaveBeenCalledTimes(1);
+      for (let i = 0; i < 12; i++) {
+        vi.advanceTimersByTime(1000);
+        record(loader, 600_000);
+        signal();
+        expect(active).toBe('sub');
+      }
+      vi.advanceTimersByTime(1000);
+      record(loader, 600_000);
+      signal();
+      expect(changes).toHaveBeenNthCalledWith(2, 'main', expect.stringContaining('Up-switch'));
+      expect(quality.getMode()).toBe('auto');
+    } finally {
+      loader.destroy();
+      vi.useRealTimers();
+    }
+  });
+});
 
-    loader.destroy();
+describe('initial HLS ceiling', () => {
+  it.each([true, false])('requests the permitted first playlist and segment (sub present: %s)', async hasSub => {
+    const base = 'https://camera.test/';
+    const master = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1700000,RESOLUTION=3840x2160,FRAME-RATE=15\nmain/list.m3u8' +
+      (hasSub ? '\n#EXT-X-STREAM-INF:BANDWIDTH=3600000,RESOLUTION=1920x1080,FRAME-RATE=12.5\nsub/list.m3u8' : '');
+    const requested: string[] = [];
+    const loader = new StreamLoader({ logger: new Logger('test'), onData: vi.fn(), onError: null, onMockPacket: null,
+      getMaxQualityKind: () => 'sub' });
+    vi.stubGlobal('fetch', async (url: string) => {
+      requested.push(url);
+      if (url.endsWith('master.m3u8')) return new Response(master);
+      if (url.endsWith('list.m3u8')) return new Response(makePlaylist(true));
+      return new Response(makeTsSegment());
+    });
+    try {
+      await loader.load(base + 'master.m3u8');
+      const role = hasSub ? 'sub' : 'main';
+      expect(loader.getActiveId()).toBe(base + role + '/list.m3u8');
+      expect(loader.getLevels().find(level => level.id === loader.getActiveId())?.fps).toBe(hasSub ? 12.5 : 15);
+      loader.start(() => false);
+      await waitFor(() => requested.some(url => url.endsWith('.ts')));
+      expect(requested.slice(1).every(url => url.startsWith(base + role + '/'))).toBe(true);
+    } finally {
+      loader.destroy();
+      vi.unstubAllGlobals();
+    }
   });
 });

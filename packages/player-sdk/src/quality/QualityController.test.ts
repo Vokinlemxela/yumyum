@@ -34,6 +34,74 @@ describe('QualityController ABR logic', () => {
     vi.restoreAllMocks();
   });
 
+  const healthy: StreamSignals = {
+    throughputKbps: 8000, throughputSamples: 8, effectiveFps: 15, targetFps: 25,
+    droppedFps: 0, avgQueueLen: 0, decoderReady: true, ts: 0,
+  };
+  function sample(controller: QualityController, signals: StreamSignals, seconds: number) {
+    for (let second = 0; second < seconds; second++) {
+      vi.advanceTimersByTime(1000);
+      controller.reportSignals(signals, true);
+    }
+  }
+
+  it('uses source FPS and reduces pixel load even when the smaller picture has a higher bitrate', () => {
+    vi.useFakeTimers();
+    try {
+      Object.assign(mockLevels[0], { width: 3840, height: 2160, fps: 15, bitrateKbps: 1700 });
+      Object.assign(mockLevels[1], { width: 1920, height: 1080, fps: 15, bitrateKbps: 3600 });
+      const controller = new QualityController(mockSource, logger, { mode: 'auto' });
+      sample(controller, healthy, 12);
+      expect(switchCalls).toEqual([]);
+      sample(controller, { ...healthy, droppedFps: 5, throughputKbps: 2500 }, 6);
+      expect(switchCalls).toEqual([]);
+      sample(controller, { ...healthy, droppedFps: 5 }, 4);
+      expect(activeId).toBe('level-sub');
+      sample(controller, healthy, 22);
+      expect(switchCalls).toEqual(['level-sub', 'level-main']);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('requires sustained RTP loss to reduce bitrate and confirmed receive capacity for recovery', () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new QualityController(mockSource, logger, { mode: 'auto' });
+      const signal = { ...healthy, targetFps: 15, throughputKbps: 300 };
+      sample(controller, { ...signal, receiverNetwork: { lossRatio: 0 } }, 25);
+      expect(switchCalls).toEqual([]);
+      sample(controller, { ...signal, receiverNetwork: { lossRatio: 0.1 } }, 2);
+      sample(controller, { ...signal, receiverNetwork: { lossRatio: 0 } }, 2);
+      expect(switchCalls).toEqual([]);
+      sample(controller, { ...signal, receiverNetwork: { lossRatio: 0.1 } }, 4);
+      expect(activeId).toBe('level-sub');
+      sample(controller, { ...signal, throughputKbps: 9000, receiverNetwork: { lossRatio: 0 } }, 30);
+      expect(activeId).toBe('level-sub');
+      sample(controller, { ...signal, receiverNetwork: { lossRatio: 0, capacityKbps: 4000 } }, 11);
+      expect(switchCalls).toEqual(['level-sub', 'level-main']);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('emits a rendition change only when the asynchronous switch succeeds', async () => {
+    let finish!: () => void;
+    let fail!: (reason: Error) => void;
+    mockSource.switchQuality = id => new Promise<void>((resolve, reject) => {
+      finish = () => { activeId = id; resolve(); };
+      fail = reject;
+    });
+    const controller = new QualityController(mockSource, logger, { mode: 'auto' });
+    controller.onQualitySwitch = vi.fn();
+    controller.setMaxQualityKind('sub');
+    expect(controller.onQualitySwitch).not.toHaveBeenCalled();
+    fail(new Error('unavailable'));
+    await Promise.resolve();
+    expect(controller.getDiagnostics().lastSwitchReason).toBe('None');
+    controller.setMaxQualityKind(null);
+    controller.setMaxQualityKind('sub');
+    finish();
+    await Promise.resolve();
+    expect(controller.onQualitySwitch).toHaveBeenCalledExactlyOnceWith('level-sub', expect.any(String));
+  });
+
   it('starts in manual mode and ignores signals', () => {
     const controller = new QualityController(mockSource, logger, { mode: 'manual' });
     expect(controller.getMode()).toBe('manual');

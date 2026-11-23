@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { WebGLVideoRenderer, YUVFrameData } from './WebGLVideoRenderer.js';
 import { WebGLContextPool } from './WebGLContextPool.js';
+import { YumYumPlayer } from '../index.js';
 import { Logger } from '../utils/Logger.js';
 
 describe('WebGLVideoRenderer & WebGLContextPool', () => {
@@ -133,6 +134,27 @@ describe('WebGLVideoRenderer & WebGLContextPool', () => {
     expect(mockGL.getUniformLocation).not.toHaveBeenCalled();
 
     renderer.destroy();
+  });
+
+  it('preserves Auto and the caller ceiling across overflow and context restoration', () => {
+    const player = new YumYumPlayer({ canvas: mockCanvas });
+    player.setQualityMode('auto');
+    const renderer = (player as unknown as { videoRenderer: WebGLVideoRenderer }).videoRenderer;
+    try {
+      renderer.onFallback?.('overflow');
+      expect(player.getMaxQualityKind()).toBe('sub');
+      expect(player.getQualityMode()).toBe('auto');
+      player.setMaxQualityKind(null);
+      expect(player.getMaxQualityKind()).toBe('sub');
+      const restored = mockCanvas.addEventListener.mock.calls.find(([name]: [string]) => name === 'webglcontextrestored')[1];
+      restored();
+      expect(player.getMaxQualityKind()).toBe(null);
+      expect(player.getQualityMode()).toBe('auto');
+      renderer.onFallback?.('overflow');
+      player.setMaxQualityKind('sub');
+      restored();
+      expect(player.getMaxQualityKind()).toBe('sub');
+    } finally { player.destroy(); }
   });
 
   it('enforces context limit and triggers overflow fallback', () => {

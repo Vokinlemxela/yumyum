@@ -525,6 +525,83 @@ describe('WHEPLoader', () => {
     loader.destroy();
   });
 
+  it('starts on a confirmed sub profile before opening a session and retains the higher profile', async () => {
+    const deps = { ...makeDeps(), getMaxQualityKind: () => 'sub' as const };
+    const main = 'whep://localhost/cam/whep';
+    const sub = 'whep://localhost/cam_secondary/whep';
+    const levels = [
+      { id: 'hi', kind: 'main', label: '4K', url: main, bitrateKbps: 2200 },
+      { id: 'lo', kind: 'sub', label: 'HD', url: sub, bitrateKbps: 600 },
+    ];
+    const fetch = vi.fn().mockResolvedValue({ ok: true, text: async () => 'v=0', headers: new Headers() });
+    vi.stubGlobal('fetch', fetch);
+    const loader = new WHEPLoader(deps as never, deps.logger as never, { qualityLevels: levels });
+    try {
+      await loader.load(main);
+      expect(fetch.mock.calls.map(call => call[0])).toEqual(['http://localhost/cam_secondary/whep']);
+      expect(loader.getLevels()).toEqual(levels);
+      expect(loader.getActiveId()).toBe('lo');
+      await loader.switchQuality('hi');
+      expect(fetch.mock.lastCall?.[0]).toBe('http://localhost/cam/whep');
+    } finally { loader.destroy(); }
+  });
+
+  it('restores the previous WHEP session after a rejected switch without reporting a playback failure', async () => {
+    const deps = makeDeps();
+    const url = 'whep://localhost/cam/whep';
+    const loader = new WHEPLoader(deps as never, deps.logger as never);
+    const ok = { ok: true, text: async () => 'v=0', headers: new Headers() };
+    const fetch = vi.fn().mockResolvedValueOnce(ok).mockResolvedValueOnce({ ok: false, status: 404 }).mockResolvedValueOnce(ok);
+    vi.stubGlobal('fetch', fetch);
+    try {
+      await loader.load(url);
+      await expect(loader.switchQuality('sub')).rejects.toThrow('404');
+      expect(loader.getActiveId()).toBe('main');
+      expect(loader.getConnectionState()).toBe('connected');
+      expect(fetch.mock.calls.map(call => call[0])).toEqual([
+        'http://localhost/cam/whep', 'http://localhost/cam/whep?stream=sub', 'http://localhost/cam/whep',
+      ]);
+      expect(deps.onError).not.toHaveBeenCalled();
+    } finally { loader.destroy(); }
+  });
+
+  it('measures interval video loss and capacity of the selected ICE pair, invalidating stale samples', async () => {
+    vi.useFakeTimers();
+    const deps = makeDeps();
+    const url = 'whep://localhost/cam/whep';
+    const loader = new WHEPLoader(deps as never, deps.logger as never, { qualityLevels: [
+      { id: 'hi', kind: 'main', label: '4K', url },
+    ] });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => 'v=0', headers: new Headers() }));
+    try {
+      await loader.load(url);
+      let received = 1000, lost = 0;
+      lastPcInstance.getStats = vi.fn().mockImplementation(async () => new Map<string, object>([
+        ['v', { type: 'inbound-rtp', id: 'video', kind: 'video', transportId: 'transport', bytesReceived: received * 100,
+          timestamp: performance.now(), packetsReceived: received, packetsLost: lost }],
+        ['transport', { type: 'transport', selectedCandidatePairId: 'current' }],
+        ['unused', { type: 'candidate-pair', availableIncomingBitrate: 90000000 }],
+        ['current', { type: 'candidate-pair', availableIncomingBitrate: 3000000 }],
+      ]));
+      await vi.advanceTimersByTimeAsync(1000);
+      received += 90;
+      lost += 10;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(loader.getThroughput()).toMatchObject({ throughputKbps: 72, receiverNetwork: { lossRatio: 0.1, capacityKbps: 3000 } });
+      received += 100;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(loader.getThroughput().receiverNetwork.lossRatio).toBe(0);
+      lastPcInstance.getStats = vi.fn().mockResolvedValue(new Map());
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(loader.getThroughput().receiverNetwork).toEqual({});
+      loader.destroy();
+      expect(loader.getThroughput().throughputSamples).toBe(0);
+    } finally {
+      loader.destroy();
+      vi.useRealTimers();
+    }
+  });
+
   describe('WHEPLoader throughput estimation', () => {
     it('polls getStats and calculates smoothed throughput', async () => {
       vi.useFakeTimers();

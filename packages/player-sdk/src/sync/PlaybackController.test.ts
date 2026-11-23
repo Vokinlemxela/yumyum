@@ -214,6 +214,16 @@ describe('PlaybackController playback rate', () => {
       expect(diag.queueLength).toBe(2);
     });
 
+    it('preserves fractional target cadence across a 12 FPS source', () => {
+      const c = new PlaybackController(null, null, null, null, null, 8, undefined, false, new Logger('test'));
+      try {
+        for (let i = 0; i < 120; i++) {
+          c.enqueueFrame({ pts: i / 12, duration: 1 / 12, data: { close() {} } as VideoFrame });
+        }
+        expect(c.getDiagnostics().queueLength).toBe(80);
+      } finally { c.destroy(); }
+    });
+
     it('optimizes queue limits and sets default FPS when lowPower is true', () => {
       const c = new PlaybackController(null, null, null, null, null, undefined, undefined, true, new Logger('test', 'silent'));
       c.duration = 60;
@@ -836,6 +846,35 @@ describe('PlaybackController keyframe-aware dropping and live backpressure', () 
 });
 
 describe('PlaybackController signals interval', () => {
+  it('restores both configured caps and queue limits; intentional decimation is not ABR pressure', () => {
+    vi.useFakeTimers();
+    const sample = vi.fn();
+    const controller = new PlaybackController(null, null, null, null, null, 30, 24, false, new Logger('test'), sample);
+    try {
+      controller.duration = 60;
+      controller.setLowPower(true);
+      for (let i = 0; i < 25; i++) {
+        controller.enqueueFrame({ pts: i / 25, duration: 0.04, data: { close() {} } as VideoFrame });
+      }
+      vi.advanceTimersByTime(1000);
+      expect(sample.mock.lastCall?.[0]).toMatchObject({ droppedFps: 0, targetFps: 8 });
+      expect(controller.getDiagnostics().backpressureActive).toBe(true);
+      controller.setLowPower(false);
+      expect(controller.getDiagnostics().backpressureActive).toBe(false);
+      vi.advanceTimersByTime(1000);
+      expect(sample.mock.lastCall?.[0].targetFps).toBe(24);
+      controller.flush();
+      for (let i = 0; i < 15; i++) {
+        controller.enqueueFrame({ pts: i / 15, duration: 1 / 15, data: { close() {} } as VideoFrame });
+      }
+      vi.advanceTimersByTime(1000);
+      expect(sample.mock.lastCall?.[0].targetFps).toBeCloseTo(15);
+    } finally {
+      controller.destroy();
+      vi.useRealTimers();
+    }
+  });
+
   it('fires onSignals callback at 1 Hz with headroom data', async () => {
     vi.useFakeTimers();
     const signals: any[] = [];

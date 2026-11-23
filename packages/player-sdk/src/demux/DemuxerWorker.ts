@@ -55,6 +55,20 @@ interface WorkerContext {
 }
 
 const workerCtx = self as unknown as WorkerContext;
+let lastMediaPTS: number | null = null;
+let nextRenditionStart: number | null = null;
+let renditionOffset = 0;
+
+function sendMedia(message: DemuxerMessage, transfer?: Transferable[]) {
+  // Share one offset across audio and video to retain their relative timing.
+  if (nextRenditionStart !== null) {
+    renditionOffset = nextRenditionStart - message.pts;
+    nextRenditionStart = null;
+  }
+  message.pts += renditionOffset;
+  lastMediaPTS = Math.max(lastMediaPTS ?? message.pts, message.pts);
+  workerCtx.postMessage(message, transfer);
+}
 
 interface DemuxerConfig {
   videoCodec: 'h264' | 'h265' | 'mjpeg';
@@ -141,8 +155,22 @@ self.onmessage = (e: MessageEvent) => {
 
   switch (type) {
     case 'INIT':
-      config = data;
-      workerLogLevel = data.logLevel || 'silent';
+    case 'LIVE_RENDITION_CHANGE':
+      if (type === 'INIT') {
+        config = data;
+        workerLogLevel = data.logLevel || 'silent';
+        lastMediaPTS = null;
+      }
+      // A different camera rendition may have a completely independent clock.
+      // Splice the new A/V epoch just after the old one, even when its
+      // first tfdt/TS timestamp jumps back to zero.
+      const sentThrough = typeof e.data.pts === 'number' ? e.data.pts : lastMediaPTS;
+      nextRenditionStart = sentThrough === null ? null : sentThrough + 0.001;
+      lastMediaPTS = sentThrough;
+      renditionOffset = 0;
+      if (nextRenditionStart !== null) {
+        self.postMessage({ type: 'LIVE_RENDITION_START', pts: nextRenditionStart });
+      }
       previousVideoPTS = null;
       previousAudioPTS = null;
       videoOffset = 0;
@@ -530,7 +558,7 @@ function demuxStream(chunk: ArrayBuffer) {
         // by this message task and is transferred to the main thread. It must be posted only once,
         // as it will be detached in the worker thread immediately following the postMessage call.
         const transferable = esData.buffer;
-        workerCtx.postMessage(
+        sendMedia(
           {
             type: 'VIDEO',
             codec: 'mjpeg',
@@ -577,7 +605,7 @@ function demuxStream(chunk: ArrayBuffer) {
     // by this message task and is transferred to the main thread. It must be posted only once,
     // as it will be detached in the worker thread immediately following the postMessage call.
     const transferableBuffer = esData.buffer;
-    workerCtx.postMessage(
+    sendMedia(
       {
         type: 'VIDEO',
         codec: config.videoCodec,
@@ -777,7 +805,7 @@ function processVideoPES(pes: Uint8Array, ptsRaw: number) {
       // by this message task and is transferred to the main thread. It must be posted only once,
       // as it will be detached in the worker thread immediately following the postMessage call.
       const transferable = pes.buffer;
-      workerCtx.postMessage(
+      sendMedia(
         {
           type: 'VIDEO',
           codec: 'mjpeg',
@@ -825,7 +853,7 @@ function processVideoPES(pes: Uint8Array, ptsRaw: number) {
   // by this message task and is transferred to the main thread. It must be posted only once,
   // as it will be detached in the worker thread immediately following the postMessage call.
   const transferableBuffer = pes.buffer;
-  workerCtx.postMessage(
+  sendMedia(
     {
       type: 'VIDEO',
       codec: config.videoCodec,
@@ -869,7 +897,7 @@ function processAudioPES(pes: Uint8Array, ptsRaw: number) {
         const adtsFrame = esData.slice(index, index + len);
         const transferable = adtsFrame.buffer;
 
-        workerCtx.postMessage(
+        sendMedia(
           {
             type: 'AUDIO',
             codec: 'aac',
@@ -984,7 +1012,7 @@ function deliverFMP4Frame(data: Uint8Array, isKeyframe: boolean, ptsSeconds?: nu
     if (currentParsedCodec) msg.parsedCodec = currentParsedCodec;
   }
   
-  workerCtx.postMessage(msg, [transferableBuffer]);
+  sendMedia(msg, [transferableBuffer]);
 }
 
 /** Wrap a raw fMP4 AAC sample in ADTS and deliver it to the audio pipeline. */
@@ -992,7 +1020,7 @@ function deliverFMP4Audio(aac: Uint8Array, ptsSeconds: number) {
   if (!audioConfig) return;
   const adts = buildAdtsFrame(audioConfig, aac);
   const transferable = adts.buffer;
-  workerCtx.postMessage(
+  sendMedia(
     {
       type: 'AUDIO',
       codec: 'aac',

@@ -56,7 +56,7 @@ function fragment(sequence: number, decodeTime: number, ...samples: Buffer[]) {
 }
 
 interface WorkerOutput {
-  type: 'VIDEO' | 'AUDIO' | 'ERROR';
+  type: 'VIDEO' | 'AUDIO' | 'ERROR' | 'LIVE_RENDITION_START';
   data?: Uint8Array;
 }
 
@@ -82,6 +82,9 @@ function startWorker() {
       const buffer = Uint8Array.from(bytes).buffer;
       receive({ data: structuredClone({ type, data: buffer }, { transfer: [buffer] }) });
     },
+    changeLiveRendition() {
+      receive({ data: { type: 'LIVE_RENDITION_CHANGE' } });
+    },
     segment(mediaBase: number) {
       receive({ data: { type: 'SEGMENT_META', mediaBase } });
     },
@@ -94,6 +97,31 @@ function expectVideo(message: WorkerOutput, sample: Buffer, pts: number, isKeyfr
 }
 
 describe('fMP4 demux worker', () => {
+  it('keeps live frames moving across main → sub → main with independent camera clocks', () => {
+    const worker = startWorker();
+    const first = fragment(1, 123_000, keyframe, deltaFrame);
+    const sub = fragment(1, 1_000, keyframe, deltaFrame);
+    const main = fragment(1, 125_000, keyframe, deltaFrame);
+
+    for (const [i, part] of [first, sub, main].entries()) {
+      if (i > 0) worker.changeLiveRendition();
+      worker.send('DEMUX', Buffer.concat([init, part.moof, part.mdat]));
+    }
+
+    expect(worker.messages.map(message => message.type)).toEqual([
+      'VIDEO', 'VIDEO', 'LIVE_RENDITION_START', 'VIDEO', 'VIDEO', 'LIVE_RENDITION_START', 'VIDEO', 'VIDEO',
+    ]);
+    const frames = worker.messages.filter(message => message.type === 'VIDEO') as Array<WorkerOutput & { pts: number }>;
+    expect(frames).toHaveLength(6);
+    for (let i = 0; i < frames.length; i++) {
+      expectVideo(frames[i], i % 2 === 0 ? keyframe : deltaFrame, frames[i].pts, i % 2 === 0);
+      if (i > 0) {
+        expect(frames[i].pts).toBeGreaterThan(frames[i - 1].pts);
+        expect(frames[i].pts - frames[i - 1].pts).toBeLessThanOrEqual(0.251);
+      }
+    }
+  });
+
   it('delivers every fragment from a segment larger than 5 MiB and rebases the next segment', () => {
     const worker = startWorker();
     const firstSample = paddedSample(keyframe, 3 * MiB);

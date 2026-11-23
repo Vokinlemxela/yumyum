@@ -18,6 +18,7 @@
 
 import { WebGLVideoRenderer } from './render/WebGLVideoRenderer.js';
 import { PCMAudioWorklet } from './render/PCMAudioWorklet.js';
+import { LivePacketQueue, type MediaPacket } from './sync/LivePacketQueue.js';
 import { PlaybackController, DecodedFrame } from './sync/PlaybackController.js';
 import { StreamLoader } from './network/StreamLoader.js';
 import { LoaderRegistry } from './network/LoaderRegistry.js';
@@ -183,7 +184,7 @@ export interface PlayerTelemetry {
   decodedFrames?: number;
   /** Current effective rendering frames per second. */
   effectiveFps?: number;
-  /** Smoothed network throughput in Kbps (EWMA). */
+  /** Recent throughput in Kbps, as measured by the active transport. */
   throughputKbps?: number;
   /** Current ABR quality controller mode ('auto' | 'manual'). */
   qualityMode?: 'auto' | 'manual';
@@ -228,11 +229,23 @@ export class YumYumPlayer {
   private decoders: DecoderRegistry;
   private logger: Logger;
   private qualityController: QualityController;
+  private requestedCeiling: 'main' | 'sub' | null = null;
+  private requestedLowPower: boolean;
+  private renderOverflow = false;
 
   private worker: Worker | null = null;
   private workerBlobUrl: string | null = null;
   private activeCodec: 'h264' | 'h265' | 'mjpeg' = 'h264';
   private isBackpressurePaused = false;
+  private livePackets = new LivePacketQueue(
+    packet => this.decodePacket(packet),
+    () => this.isBackpressurePaused || (this.decoders.get(this.activeCodec)?.pendingFrames?.() ?? 0) >= 12,
+    count => this.playbackController.reportSkippedLiveFrames(count),
+    pts => {
+      this.audioRenderer.flush();
+      this.playbackController.seek(pts);
+    },
+  );
   private isInitialized = false;
   /** User-requested mute state, kept separate from the automatic mute applied at non-1x speeds. */
   private userMuted = false;
@@ -318,6 +331,7 @@ export class YumYumPlayer {
    * ```
    */
   constructor(private config: PlayerConfig) {
+    this.requestedLowPower = !!config.lowPower;
     this.logger = new Logger('YumYumPlayer', config.logLevel || 'silent');
 
     const playerQualitySource: QualitySource = {
@@ -339,12 +353,11 @@ export class YumYumPlayer {
       this.logger.warn(`YumYumPlayer: render fallback occurred. Reason: ${reason}`);
       this.emit('renderfallback', reason);
       if (reason === 'overflow') {
-        this.setLowPower(true);
-        this.setQuality('sub').catch((err) => {
-          this.logger.debug('Failed to switch to sub quality during render fallback demotion:', err);
-        });
+        this.setRenderOverflow(true);
       }
     };
+
+    this.videoRenderer.onRecovered = () => this.setRenderOverflow(false);
 
     // 2. Initialize PCM AudioWorklet
     this.audioRenderer = new PCMAudioWorklet(this.logger.createChild('PCMAudioWorklet'));
@@ -407,6 +420,7 @@ export class YumYumPlayer {
         if (tp) {
           signals.throughputKbps = tp.throughputKbps;
           signals.throughputSamples = tp.throughputSamples;
+          signals.receiverNetwork = tp.receiverNetwork;
         }
         this.lastSignals = signals;
         const isLive = this.getDuration() === Infinity;
@@ -449,12 +463,18 @@ export class YumYumPlayer {
 
     // 5. Shared dependencies handed to every stream loader
     this.loaderDeps = {
+      getMaxQualityKind: () => this.qualityController.getMaxQualityKind(),
       onData: (buffer, streaming) => {
         // Direct raw media buffers to the background demuxer worker.
         // Discrete HLS segments use DEMUX; continuous live chunks use STREAM_DEMUX.
         if (this.worker) {
           this.worker.postMessage({ type: streaming ? 'STREAM_DEMUX' : 'DEMUX', data: buffer }, [buffer]);
         }
+      },
+      onLiveRenditionChange: () => {
+        const pts = this.livePackets.lastSentPTS;
+        this.livePackets.reset();
+        this.worker?.postMessage({ type: 'LIVE_RENDITION_CHANGE', pts });
       },
       onSegmentMeta: (meta) => {
         // Archive VOD only: arrives in order, just before the matching segment's
@@ -534,6 +554,7 @@ export class YumYumPlayer {
     // against `this.loadEpoch` before mutating shared state — a mismatch
     // means a newer load() or a destroy() ran while we were suspended.
     const epoch = ++this.loadEpoch;
+    this.livePackets.reset();
 
     this.logger.info(`Loading stream from: ${url} (Current state: ${this.lifecycleState})`);
     this.lifecycleState = 'LOADING';
@@ -630,6 +651,16 @@ export class YumYumPlayer {
     }
   }
 
+  private decodePacket(packet: MediaPacket) {
+    if (packet.type === 'VIDEO') {
+      if (packet.codec === 'aac') return;
+      this.activeCodec = packet.codec;
+      if (!shouldDecodeFrame(this.getPlaybackRate(), !!packet.isKeyframe)) return;
+    }
+    this.decoders.get(packet.codec)?.decode(packet.data, Math.floor(packet.pts * 1_000_000),
+      packet.type === 'AUDIO' || !!packet.isKeyframe, packet.parsedCodec, packet.description);
+  }
+
   private initDemuxWorker(): void {
     if (this.worker) {
       this.logger.info(`Reusing active Demuxer Worker instance. Resetting internal state. Active Codec: ${this.activeCodec}`);
@@ -653,7 +684,7 @@ export class YumYumPlayer {
 
       this.worker.onmessage = (e: MessageEvent) => {
         try {
-          const { type, codec, pts, data, isKeyframe } = e.data;
+          const { type, pts } = e.data;
 
           if (type === 'ERROR') {
             this.emit('error', new Error(e.data.error || 'Unknown demuxer worker error'));
@@ -669,19 +700,19 @@ export class YumYumPlayer {
             return;
           }
 
-          if (type === 'VIDEO') {
-            this.activeCodec = codec;
-            if (!shouldDecodeFrame(this.getPlaybackRate(), isKeyframe)) {
-              return; // Discard non-keyframes at high speed (>= 4x) to unload the decoder
-            }
-            const decoder = this.decoders.get(codec);
-            if (decoder) {
-              decoder.decode(data, Math.floor(pts * 1000000), isKeyframe, e.data.parsedCodec, e.data.description);
-            }
-          } else if (type === 'AUDIO') {
-            const decoder = this.decoders.get('aac');
-            if (decoder) {
-              decoder.decode(data, Math.floor(pts * 1000000), true);
+          if (type === 'LIVE_RENDITION_START') {
+            // Release old buffered media and discard late decoder output below
+            // the boundary. The new stream can render as soon as it is decoded.
+            this.decoders.flushAll();
+            this.audioRenderer.flush();
+            this.playbackController.seek(pts);
+            return;
+          }
+          if (type === 'VIDEO' || type === 'AUDIO') {
+            if (this.activeLoader?.kind === 'pull' && this.getDuration() === Infinity) {
+              this.livePackets.push(e.data);
+            } else {
+              this.decodePacket(e.data);
             }
           }
         } catch (err) {
@@ -786,8 +817,11 @@ export class YumYumPlayer {
         return;
       }
 
-      await this.activeLoader.quality.switchQuality(resolvedId);
-      this.emit('qualitychange', resolvedId);
+      const source = this.activeLoader.quality;
+      await source.switchQuality(resolvedId);
+      if (this.activeLoader?.quality === source && source.getActiveId() === resolvedId) {
+        this.emit('qualitychange', resolvedId);
+      }
     }
   }
 
@@ -820,7 +854,8 @@ export class YumYumPlayer {
 
   /** Set maximum allowed quality kind constraint (e.g. for grid density limiting) */
   public setMaxQualityKind(kind: 'main' | 'sub' | null): void {
-    this.qualityController.setMaxQualityKind(kind);
+    this.requestedCeiling = kind;
+    this.qualityController.setMaxQualityKind(this.renderOverflow ? 'sub' : kind);
   }
 
   /** Start or resume playback */
@@ -848,13 +883,14 @@ export class YumYumPlayer {
     });
     this.playbackController.start();
     // `push` loaders stream on connect and treat this as a no-op.
-    this.activeLoader?.start(() => this.isBackpressurePaused);
+    this.activeLoader?.start(() => this.isBackpressurePaused || this.livePackets.hasLookahead);
     this.lifecycleState = 'PLAYING';
     this.emit('play');
   }
 
   /** Pause playback */
   public pause(): void {
+    this.livePackets.reset();
     if (this.lifecycleState === 'DESTROYED') {
       return;
     }
@@ -898,7 +934,7 @@ export class YumYumPlayer {
     // keeps ticking but no new frames arrive) until the next play() call.
     if (this.lifecycleState === 'PLAYING') {
       this.activeLoader.stop();
-      this.activeLoader.start(() => this.isBackpressurePaused);
+      this.activeLoader.start(() => this.isBackpressurePaused || this.livePackets.hasLookahead);
     }
   }
 
@@ -967,7 +1003,15 @@ export class YumYumPlayer {
 
   /** Set the player into economical lowPower mode dynamically */
   public setLowPower(lowPower: boolean): void {
-    this.playbackController.setLowPower(lowPower);
+    this.requestedLowPower = lowPower;
+    this.playbackController.setLowPower(this.renderOverflow || lowPower);
+  }
+
+  private setRenderOverflow(overflow: boolean): void {
+    if (this.renderOverflow === overflow) return;
+    this.renderOverflow = overflow;
+    this.playbackController.setLowPower(overflow || this.requestedLowPower);
+    this.qualityController.setMaxQualityKind(overflow ? 'sub' : this.requestedCeiling);
   }
 
   /** Get the current playback position in seconds. */
@@ -1109,6 +1153,7 @@ export class YumYumPlayer {
     // Bump the load epoch so any in-flight load() sees it superseded on its
     // next post-await check and bails out instead of resurrecting state.
     this.loadEpoch++;
+    this.livePackets.reset();
 
     this.logger.info(`Destroying player (Current state: ${this.lifecycleState})`);
     this.pause();

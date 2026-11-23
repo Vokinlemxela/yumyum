@@ -7,6 +7,7 @@ export interface IBaseDecoder {
   flush(): void;
   destroy(): void;
   isSoftwareFallback?(): boolean;
+  pendingFrames?(): number;
 }
 
 export class DecoderRegistry {
@@ -181,6 +182,8 @@ export abstract class BaseVideoDecoder implements IBaseDecoder {
   ) {
     this.currentCodec = defaultCodec;
   }
+
+  public pendingFrames(): number { return this.decoder?.decodeQueueSize ?? 0; }
 
   public abstract isSoftwareFallback(): boolean;
   public abstract decode(packet: Uint8Array, timestampUs: number, isKeyframe: boolean, parsedCodec?: string, description?: Uint8Array): void;

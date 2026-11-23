@@ -18,7 +18,9 @@ export interface QualityControllerOptions {
 export class QualityController {
   private mode: 'auto' | 'manual' = 'manual';
   private maxAllowedKind: 'main' | 'sub' | null = null;
+  private lastAttemptTime = -Infinity;
   private lastSwitchTime = 0;
+  private switching = false;
   private lastSwitchReason = 'None';
   private downDwellStartTime: number | null = null;
   private upDwellStartTime: number | null = null;
@@ -107,106 +109,75 @@ export class QualityController {
     }
 
     const now = performance.now();
-    if (this.lastSwitchTime > 0 && now - this.lastSwitchTime < this.cooldownMs) {
+    if (this.switching || now - this.lastAttemptTime < this.cooldownMs) {
       return; // Inside cooldown period
     }
 
-    const levels = this.getSortedLevels();
-    if (levels.length <= 1) {
-      return; // No other quality options
+    const levels = this.source.getLevels().filter(level => level.id !== 'auto');
+    const current = levels.find(level => level.id === this.source.getActiveId());
+    if (levels.length < 2 || !current || this.evaluateRestriction()) return;
+
+    // Visual preference and decode cost follow geometry/role. Network pressure
+    // uses bitrate independently: an HD substream can cost more bandwidth than 4K.
+    levels.sort(comparePictureQuality);
+    const position = levels.indexOf(current);
+    const allowed = (level: QualityLevel) => !(this.maxAllowedKind === 'sub' && level.kind === 'main');
+    const lowerPicture = levels.slice(position + 1).filter(allowed);
+    const bandwidth = signals.receiverNetwork
+      ? signals.receiverNetwork.capacityKbps ?? 0 : signals.throughputKbps;
+    const loss = signals.receiverNetwork?.lossRatio;
+    const lowBandwidth = !!current.bitrateKbps && bandwidth > 0 && bandwidth < current.bitrateKbps * this.safetyFactor;
+    const packetLoss = loss !== undefined && loss >= 0.05;
+    const targetFps = Math.min(signals.targetFps, current.fps ?? Infinity);
+
+    let reason = '';
+    if (signals.droppedFps > this.droppedFpsThreshold) {
+      reason = `High frame drops: ${signals.droppedFps} FPS`;
+    } else if (signals.decoderReady && signals.effectiveFps < targetFps * this.fpsRatioThreshold) {
+      reason = `Low rendering FPS: ${signals.effectiveFps}/${targetFps}`;
+    } else if (!isLive && signals.decoderReady && signals.avgQueueLen < this.queueStarvationThreshold) {
+      reason = `Frame queue starvation: avg len ${signals.avgQueueLen}`;
     }
+    const playbackPressure = !!reason;
+    if (!reason && packetLoss) reason = `RTP packet loss: ${(loss * 100).toFixed(1)}%`;
+    if (!reason && lowBandwidth) reason = `Insufficient bandwidth: ${bandwidth.toFixed(0)} Kbps`;
 
-    const activeId = this.source.getActiveId();
-    const activeIndex = levels.findIndex(l => l.id === activeId);
-    if (activeIndex === -1) {
-      return; // Active quality not found in the levels list
-    }
-
-    const currentLevel = levels[activeIndex];
-
-    // 1. Evaluate restriction first (e.g. if we are on a restricted level, force down)
-    if (this.evaluateRestriction()) {
+    if (reason) {
+      this.upDwellStartTime = null;
+      this.downDwellStartTime ??= now;
+      if (now - this.downDwellStartTime < this.downDwellMs) return;
+      let candidates = playbackPressure ? lowerPicture : levels.filter(allowed);
+      if (lowBandwidth || packetLoss) {
+        if (current.bitrateKbps) {
+          const currentRate = current.bitrateKbps;
+          candidates = candidates.filter(level => level.bitrateKbps && level.bitrateKbps < currentRate)
+            .sort((a, b) => b.bitrateKbps! - a.bitrateKbps!);
+        } else {
+          // An explicitly configured lower RTP profile can be tried on packet loss.
+          candidates = lowerPicture;
+        }
+      }
+      if (playbackPressure && bandwidth > 0 && current.bitrateKbps) {
+        const currentRate = current.bitrateKbps;
+        candidates = candidates.filter(level => !level.bitrateKbps || level.bitrateKbps <= currentRate ||
+          level.bitrateKbps * this.safetyFactor <= bandwidth);
+      }
+      if (candidates[0]) this.switchQuality(candidates[0].id, `Down-switch: ${reason}`);
       return;
     }
+    this.downDwellStartTime = null;
 
-    // 2. Down-switch Check (OR logic)
-    let isDownTriggered = false;
-    let downReason = '';
-
-    // Drops rule
-    if (signals.droppedFps > this.droppedFpsThreshold) {
-      isDownTriggered = true;
-      downReason = `High frame drops: ${signals.droppedFps} FPS`;
-    }
-
-    // Lag ratio rule
-    if (!isDownTriggered && signals.decoderReady && signals.effectiveFps < signals.targetFps * this.fpsRatioThreshold) {
-      isDownTriggered = true;
-      downReason = `Low rendering FPS: ${signals.effectiveFps}/${signals.targetFps}`;
-    }
-
-    // Queue starvation rule (VOD only to prevent false down-switches on low-latency live streams)
-    if (!isDownTriggered && !isLive && signals.decoderReady && signals.avgQueueLen < this.queueStarvationThreshold) {
-      isDownTriggered = true;
-      downReason = `Frame queue starvation: avg len ${signals.avgQueueLen}`;
-    }
-
-    // Throughput safety rule
-    if (!isDownTriggered && currentLevel.bitrateKbps && signals.throughputKbps > 0) {
-      const requiredBitrate = currentLevel.bitrateKbps * this.safetyFactor;
-      if (signals.throughputKbps < requiredBitrate) {
-        isDownTriggered = true;
-        downReason = `Insufficient bandwidth: ${signals.throughputKbps.toFixed(0)} Kbps < required ${requiredBitrate.toFixed(0)} Kbps`;
+    const next = levels.slice(0, position).reverse().find(allowed);
+    const healthyReception = !signals.receiverNetwork || (loss !== undefined && loss <= 0.01);
+    if (next?.bitrateKbps && bandwidth >= next.bitrateKbps * this.upHeadroomFactor &&
+        signals.decoderReady && signals.droppedFps === 0 && healthyReception) {
+      this.upDwellStartTime ??= now;
+      if (now - this.upDwellStartTime >= this.upDwellMs) {
+        this.switchQuality(next.id, `Up-switch: Bandwidth ${bandwidth.toFixed(0)} Kbps`);
       }
-    }
-
-    if (isDownTriggered) {
-      this.upDwellStartTime = null; // Clear up-dwell
-      if (this.downDwellStartTime === null) {
-        this.downDwellStartTime = now;
-      } else if (now - this.downDwellStartTime >= this.downDwellMs) {
-        // Trigger downswitch if we are not already at the lowest quality
-        if (activeIndex < levels.length - 1) {
-          const nextLevel = levels[activeIndex + 1];
-          this.switchQuality(nextLevel.id, `Down-switch: ${downReason}`);
-        }
-      }
-      return; // Evaluated down-switch, don't check up-switch
     } else {
-      this.downDwellStartTime = null; // Reset down-dwell
+      this.upDwellStartTime = null;
     }
-
-    // 3. Up-switch Check (AND logic)
-    // Up-switch checks the next higher level (activeIndex - 1 in sorted list)
-    if (activeIndex > 0) {
-      const nextHigherLevel = levels[activeIndex - 1];
-
-      // Check if the next higher level violates the current maxAllowedKind restriction
-      if (this.maxAllowedKind && nextHigherLevel.kind && nextHigherLevel.kind !== this.maxAllowedKind) {
-        this.upDwellStartTime = null;
-        return;
-      }
-
-      if (nextHigherLevel.bitrateKbps && signals.throughputKbps > 0) {
-        const requiredBitrate = nextHigherLevel.bitrateKbps * this.upHeadroomFactor;
-        const throughputOk = signals.throughputKbps >= requiredBitrate;
-        const noDrops = signals.droppedFps === 0;
-
-        if (throughputOk && noDrops) {
-          if (this.upDwellStartTime === null) {
-            this.upDwellStartTime = now;
-          } else if (now - this.upDwellStartTime >= this.upDwellMs) {
-            this.switchQuality(
-              nextHigherLevel.id,
-              `Up-switch: Bandwidth ${signals.throughputKbps.toFixed(0)} Kbps >= required ${requiredBitrate.toFixed(0)} Kbps`
-            );
-          }
-          return;
-        }
-      }
-    }
-
-    this.upDwellStartTime = null; // Reset up-dwell
   }
 
   public getDiagnostics() {
@@ -251,22 +222,31 @@ export class QualityController {
   }
 
   private switchQuality(id: string, reason: string): void {
+    if (this.switching) return;
     this.logger.info(`[QualityController] Switching quality to ${id}. Reason: ${reason}`);
-    this.lastSwitchTime = performance.now();
-    this.lastSwitchReason = reason;
+    this.lastAttemptTime = performance.now();
     this.downDwellStartTime = null;
     this.upDwellStartTime = null;
-
-    try {
-      const res = this.source.switchQuality(id);
-      if (res instanceof Promise) {
-        res.catch((err) => {
-          this.logger.error(`[QualityController] Async error during switchQuality to ${id}:`, err);
-        });
-      }
+    const confirm = () => {
+      this.switching = false;
+      if (this.source.getActiveId() !== id) return;
+      this.lastSwitchTime = performance.now();
+      this.lastSwitchReason = reason;
       this.onQualitySwitch?.(id, reason);
-    } catch (e) {
-      this.logger.error(`[QualityController] Failed to switch quality to ${id}:`, e);
+      this.evaluateRestriction();
+    };
+    const failed = (error: unknown) => {
+      this.switching = false;
+      this.logger.error(`[QualityController] Failed to switch quality to ${id}:`, error);
+    };
+
+    this.switching = true;
+    try {
+      const result = this.source.switchQuality(id);
+      if (result) void result.then(confirm, failed);
+      else confirm();
+    } catch (error) {
+      failed(error);
     }
   }
 
@@ -279,4 +259,14 @@ export class QualityController {
       .filter(l => l.id !== 'auto')
       .sort((a, b) => (b.bitrateKbps || 0) - (a.bitrateKbps || 0));
   }
+}
+
+function comparePictureQuality(a: QualityLevel, b: QualityLevel): number {
+  if (a.width && a.height && b.width && b.height) {
+    const pixels = b.width * b.height - a.width * a.height;
+    if (pixels) return pixels;
+  }
+  if (a.kind === 'main' && b.kind === 'sub') return -1;
+  if (a.kind === 'sub' && b.kind === 'main') return 1;
+  return (b.bitrateKbps ?? 0) - (a.bitrateKbps ?? 0);
 }
